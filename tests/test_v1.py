@@ -126,6 +126,20 @@ def test_auth():
     check("api key missing -> 401", c.request("GET", "/api/x", follow=False)[0] == 401)
     check("api key valid", b'"plan": "pro"' in c.request("GET", "/api/x", headers={"Authorization": "Bearer " + raw}, follow=False)[1])
     check("password hashing", u.check_password("pw123456") and not u.check_password("x"))
+    # api-key metering: billed to the key, not the session
+    import larz.money as _money
+    from larz.auth import ApiKey, _hash_key
+    _money.enable(app, base_url="http://x")
+    @app.api_key_required
+    @app.metered("$0.02/call")
+    @app.post("/api/meter")
+    def meter(req): return {"ok": True}
+    raw2 = app.auth.issue_api_key(plan="pro")     # userless key -> billed by key
+    ak = ApiKey.where(key_hash=_hash_key(raw2)).first()
+    app.money.store.add_credit("apikey:%s" % ak.id, 5)
+    hdr = {"Authorization": "Bearer " + raw2}
+    check("api-key metered 200 when funded", c.request("POST", "/api/meter", headers=hdr, follow=False)[0] == 200)
+    check("api-key metered debits the key", app.money.store.balance("apikey:%s" % ak.id) == 3)
     tok = app.auth.make_reset_token(u)
     app.auth.reset_password(tok, "newpw999")
     check("password reset token", app.auth.User.get(u.id).check_password("newpw999"))

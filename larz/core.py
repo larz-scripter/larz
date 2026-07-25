@@ -84,7 +84,14 @@ class Request:
 
     @property
     def subject(self):
-        """Who this request is 'billed to': logged-in user, else the session id."""
+        """Who this request is 'billed to': a logged-in user (stable across
+        devices), else an API key, else the anonymous session id."""
+        u = getattr(self, "user", None)
+        if u is not None and getattr(u, "id", None) is not None:
+            return "user:%s" % u.id
+        ak = getattr(self, "api_key", None)
+        if ak is not None and getattr(ak, "id", None) is not None:
+            return "apikey:%s" % ak.id
         return self.session.get("user") or self.session.get("sid")
 
 

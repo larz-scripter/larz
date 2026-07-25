@@ -229,8 +229,9 @@ def enable(app, user_model=None, secret=None):
                 if plan and k.plan != plan:
                     return Response.json({"error": "plan '%s' required" % plan}, status=403)
                 req.api_key = k
-                if k.user_id:
-                    req.user = engine.User.get(k.user_id)
+                # the key is the principal for this request: bind to its user if
+                # any, else clear the session user so billing is keyed by the key
+                req.user = engine.User.get(k.user_id) if k.user_id else None
                 return None
             f._larz_guards = list(getattr(f, "_larz_guards", [])) + [guard]
             return f
