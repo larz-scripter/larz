@@ -248,6 +248,30 @@ class _Money:
             return "plan:" + spec["plan"]
         return spec.get("sku") or route.pattern.strip("/").replace("/", ":") or "root"
 
+    # -- imperative API (for dynamic prices — catalogs, per-item checkout) -- #
+    def entitled(self, req, sku):
+        """True if this caller has paid for `sku`."""
+        return self.store.is_entitled(req.subject, sku)
+
+    def require(self, req, sku, price=None, cents=None, success_path=None):
+        """Imperative paywall for dynamic prices. Returns None if the caller is
+        already entitled to `sku` (proceed to serve), else a redirect Response
+        to checkout. Use inside a handler when the price isn't known until
+        request time (e.g. a product catalog):
+
+            gate = app.money.require(req, sku=p.slug, price=p.price)
+            if gate: return gate
+            return deliver(p)
+        """
+        if self.store.is_entitled(req.subject, sku):
+            return None
+        if cents is None:
+            cents, interval = parse_price(price)
+            if interval:
+                self.store.set_interval(sku, interval)
+        return Response.redirect(
+            self._checkout(req, req.subject, sku, cents, success_path))
+
     def _checkout(self, req, subject, sku, cents, success_path=None):
         cents2, ok = self.store.apply_coupon(req.query.get("coupon"), cents)
         success = self.base_url + (success_path or req.path)

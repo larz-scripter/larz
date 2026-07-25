@@ -179,6 +179,30 @@ def test_bot_filter():
     check("bot blocked 403", c.request("GET", "/y", headers={"User-Agent": "Googlebot/2.1"})[0] == 403)
 
 
+# ---- imperative paywall (dynamic per-item prices) ------------------------ #
+def test_require_dynamic(db):
+    app = Larz(secret="t")
+    m = money.enable(app, db=db, base_url="http://x")
+    catalog = {"guide-a": 17.0, "bundle-b": 49.0}
+    @app.get("/buy/<slug>")
+    def buy(req):
+        price = catalog[req.params["slug"]]
+        gate = m.require(req, sku=req.params["slug"], cents=int(price * 100),
+                         success_path=req.path)
+        if gate:
+            return gate
+        return "DELIVER:" + req.params["slug"]
+    c = Client(app)
+    # different products, different prices, no per-route decoration
+    code, body = c.request("GET", "/buy/guide-a", follow=True)
+    check("dynamic paywall delivers after checkout", code == 200 and body == b"DELIVER:guide-a")
+    subj = json.loads(c.request("GET", "/larz/credits?format=json")[1])["subject"]
+    check("entitled only to purchased sku", m.store.is_entitled(subj, "guide-a")
+          and not m.store.is_entitled(subj, "bundle-b"))
+    check("recorded payment cents = product price", any(
+        p["cents"] == 1700 for p in m.store.stats()["recent"]))
+
+
 # ---- providers (GemVault webhook signature + uid packing) ---------------- #
 def test_gemvault_provider():
     import hmac, hashlib
@@ -218,5 +242,6 @@ if __name__ == "__main__":
     test_rate_limit()
     test_bot_filter()
     test_gemvault_provider()
+    test_require_dynamic(db("require"))
     print("\n  %d passed, %d failed" % (PASS[0], FAIL[0]))
     sys.exit(1 if FAIL[0] else 0)
