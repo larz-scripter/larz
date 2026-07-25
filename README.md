@@ -1,6 +1,15 @@
 # ⚡ Larz
 
+[![PyPI](https://img.shields.io/pypi/v/larz.svg)](https://pypi.org/project/larz/)
+[![Python](https://img.shields.io/pypi/pyversions/larz.svg)](https://pypi.org/project/larz/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
+
 **The money-native web framework.**
+
+```bash
+pip install larz
+```
 
 Larz is a small, from-scratch, **dependency-free** Python web framework where
 **payments, paywalls, subscriptions, trials, and usage-metering are first-class
