@@ -179,6 +179,31 @@ def test_bot_filter():
     check("bot blocked 403", c.request("GET", "/y", headers={"User-Agent": "Googlebot/2.1"})[0] == 403)
 
 
+# ---- providers (GemVault webhook signature + uid packing) ---------------- #
+def test_gemvault_provider():
+    import hmac, hashlib
+    from larz.providers import GemVaultProvider
+    from larz.core import Request
+    gv = GemVaultProvider(app="eh_shop", api_base="http://gv", token="tok", secret="s3cret")
+    check("gemvault packs subject|sku", gv._pack("subjA", "plan:pro") == "subjA|plan:pro")
+    body = json.dumps({"uid": "subjA|plan:pro", "usd_amount": 9.0,
+                       "tx_hash": "0xabc"}).encode()
+    good = hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
+
+    def make_req(sig):
+        env = {"REQUEST_METHOD": "POST", "PATH_INFO": "/larz/webhook/gemvault",
+               "QUERY_STRING": "", "CONTENT_LENGTH": str(len(body)),
+               "wsgi.input": io.BytesIO(body), "HTTP_X_GV_SIGNATURE": sig}
+        return Request(env)
+
+    res = gv.parse_webhook(make_req(good))
+    check("gemvault valid webhook -> subject", res and res["subject"] == "subjA")
+    check("gemvault valid webhook -> sku", res["sku"] == "plan:pro")
+    check("gemvault valid webhook -> cents", res["cents"] == 900)
+    check("gemvault valid webhook -> payment_id", res["payment_id"] == "0xabc")
+    check("gemvault bad signature rejected", gv.parse_webhook(make_req("deadbeef")) is None)
+
+
 if __name__ == "__main__":
     d = tempfile.mkdtemp()
     def db(n): return os.path.join(d, n + ".db")
@@ -192,5 +217,6 @@ if __name__ == "__main__":
     test_dashboard(db("dash"))
     test_rate_limit()
     test_bot_filter()
+    test_gemvault_provider()
     print("\n  %d passed, %d failed" % (PASS[0], FAIL[0]))
     sys.exit(1 if FAIL[0] else 0)

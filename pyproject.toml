@@ -7,7 +7,7 @@ name = "larz"
 version = "0.2.0"
 description = "The money-native web framework — payments, paywalls and metering as first-class primitives. Zero dependencies."
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.7"
 license = { text = "MIT" }
 authors = [{ name = "Larz" }]
 keywords = ["web", "framework", "payments", "paywall", "metering", "stripe", "monetization", "wsgi"]

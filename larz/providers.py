@@ -128,21 +128,42 @@ class StripeProvider(PaymentProvider):
 
 # --------------------------------------------------------------------------- #
 class GemVaultProvider(PaymentProvider):
-    """Estate rail: GemVault multi-merchant hosted checkout + signed webhook.
-    Mirrors the estate's real GemVault integration (X-GV-Signature over body)."""
+    """Estate rail: GemVault multi-merchant hub (card via Dodo + crypto).
+
+    Verified against the estate's live GemVault `mkt.py`:
+      * create : POST {api}/api/mkt/dodo/checkout  (token-authed, server-to-server)
+                 body {app, uid, amount, return_url} -> {checkout_url}
+                 (`app` must be in GemVault's DODO_ALLOWED_APPS allowlist)
+      * webhook: X-GV-Signature = HMAC-SHA256(raw_body, secret) hex,
+                 body carries {uid, usd_amount, tx_hash|session_id}
+
+    GemVault only round-trips `uid`, so Larz packs `subject|sku` into it and
+    unpacks on the way back — giving the framework its (subject, sku) grant."""
     name = "gemvault"
 
-    def __init__(self, merchant, api_base, secret):
-        self.merchant = merchant
+    def __init__(self, app, api_base, token, secret):
+        self.app_name = app                 # your GemVault merchant/app id
         self.api_base = api_base.rstrip("/")
-        self.secret = secret
+        self.token = token                  # server-to-server auth token
+        self.secret = secret                # webhook HMAC secret
+
+    @staticmethod
+    def _pack(subject, sku):
+        return "%s|%s" % (subject, sku)
+
+    @staticmethod
+    def _unpack(uid):
+        subject, _, sku = (uid or "").partition("|")
+        return subject, sku
 
     def create_checkout(self, subject, sku, cents, success_url, cancel_url):
-        resp = _post_json(self.api_base + "/checkout", {
-            "app": self.merchant, "uid": subject, "sku": sku,
-            "usd_amount": round(cents / 100.0, 2),
-            "success_url": success_url, "cancel_url": cancel_url})
-        return resp["url"]
+        resp = _post_json(self.api_base + "/api/mkt/dodo/checkout", {
+            "app": self.app_name,
+            "uid": self._pack(subject, sku),
+            "amount": round(cents / 100.0, 2),
+            "return_url": success_url},
+            headers={"Authorization": "Bearer " + self.token})
+        return resp["checkout_url"]
 
     def parse_webhook(self, req):
         sig = req.header("X-GV-Signature") or ""
@@ -150,11 +171,11 @@ class GemVaultProvider(PaymentProvider):
         if not hmac.compare_digest(sig, expected):
             return None
         e = req.json() or {}
-        if e.get("status") != "paid":
-            return None
-        return {"subject": e.get("uid"), "sku": e.get("sku"),
+        subject, sku = self._unpack(e.get("uid"))
+        pid = e.get("tx_hash") or e.get("session_id") or e.get("id")
+        return {"subject": subject, "sku": sku,
                 "cents": int(round(float(e.get("usd_amount", 0)) * 100)),
-                "payment_id": e.get("id")}
+                "payment_id": pid}
 
 
 # --------------------------------------------------------------------------- #
