@@ -6,11 +6,33 @@ and can ping IndexNow (which Bing honours — and Bing is where a lot of
 long-tail money traffic actually lands) whenever you publish a URL.
 """
 
+import html
 import urllib.parse
 import urllib.request
 from .core import Response
 
-__all__ = ["enable"]
+__all__ = ["enable", "meta_tags"]
+
+
+def meta_tags(title, description="", url="", image="", site_name="", type="website"):
+    """Render a full <title> + SEO + OpenGraph + Twitter-card meta block."""
+    e = lambda s: html.escape(str(s), quote=True)
+    tags = ["<title>%s</title>" % e(title),
+            "<meta name='description' content='%s'>" % e(description),
+            "<meta property='og:title' content='%s'>" % e(title),
+            "<meta property='og:description' content='%s'>" % e(description),
+            "<meta property='og:type' content='%s'>" % e(type),
+            "<meta name='twitter:card' content='summary_large_image'>",
+            "<meta name='twitter:title' content='%s'>" % e(title),
+            "<meta name='twitter:description' content='%s'>" % e(description)]
+    if url:
+        tags.append("<meta property='og:url' content='%s'>" % e(url))
+    if image:
+        tags.append("<meta property='og:image' content='%s'>" % e(image))
+        tags.append("<meta name='twitter:image' content='%s'>" % e(image))
+    if site_name:
+        tags.append("<meta property='og:site_name' content='%s'>" % e(site_name))
+    return "\n".join(tags)
 
 
 class _Seo:

@@ -120,7 +120,7 @@ def test_metering(tmpdb):
     code, body = c.request("POST", "/api", follow=False)
     check("metered 402 when broke", code == 402)
     # discover this client's subject, then credit it
-    code, body = c.request("GET", "/larz/credits")
+    code, body = c.request("GET", "/larz/credits?format=json")
     subject = json.loads(body)["subject"]
     app.money.store.add_credit(subject, 5)   # 5 cents = 2 calls + change
     code, _ = c.request("POST", "/api", follow=False)

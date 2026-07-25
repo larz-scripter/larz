@@ -11,17 +11,21 @@ metadata that the @app.paid / @app.metered decorators attach to handlers.
 """
 
 import re
+import os
 import json
 import hmac
 import time
 import base64
 import hashlib
 import uuid
+import inspect
+import mimetypes
+import traceback as _traceback
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
-__all__ = ["Larz", "Request", "Response"]
+__all__ = ["Larz", "Request", "Response", "Blueprint"]
 
 
 # --------------------------------------------------------------------------- #
@@ -191,9 +195,32 @@ class _Sessions:
 # --------------------------------------------------------------------------- #
 #  The app
 # --------------------------------------------------------------------------- #
-class Larz:
-    def __init__(self, secret="dev-insecure-change-me", name="larz-app"):
+class Blueprint:
+    """A group of routes registered under a common url prefix."""
+
+    def __init__(self, name, prefix=""):
         self.name = name
+        self.prefix = prefix.rstrip("/")
+        self._pending = []
+
+    def route(self, pattern, methods=("GET",), **opts):
+        def deco(fn):
+            self._pending.append((methods, pattern, fn, opts))
+            return fn
+        return deco
+
+    def get(self, pattern, **opts):
+        return self.route(pattern, ("GET",), **opts)
+
+    def post(self, pattern, **opts):
+        return self.route(pattern, ("POST",), **opts)
+
+
+class Larz:
+    def __init__(self, secret="dev-insecure-change-me", name="larz-app",
+                 debug=False, templates=None):
+        self.name = name
+        self.debug = debug
         self.routes = []
         self.sessions = _Sessions(secret)
         self._before = []
@@ -201,6 +228,9 @@ class Larz:
         self._error_handlers = {}
         self.money = None     # attached by larz.money.enable(app, ...)
         self.seo = None       # attached by larz.seo.enable(app, ...)
+        self.templates = None
+        if templates:
+            self.use_templates(templates)
 
     # -- registration ------------------------------------------------------- #
     def route(self, pattern, methods=("GET",), **opts):
@@ -208,6 +238,59 @@ class Larz:
             self.routes.append(_Route(methods, pattern, fn, **opts))
             return fn
         return deco
+
+    def register(self, blueprint):
+        """Mount a Blueprint's routes under its prefix."""
+        for methods, pattern, fn, opts in blueprint._pending:
+            self.routes.append(_Route(methods, blueprint.prefix + pattern, fn, **opts))
+        return self
+
+    # -- templating --------------------------------------------------------- #
+    def use_templates(self, directory, auto_reload=None, globals=None):
+        from .templating import Environment
+        self.templates = Environment(
+            directory, auto_reload=self.debug if auto_reload is None else auto_reload,
+            globals=globals)
+        return self.templates
+
+    def render(self, template_name, status=200, **ctx):
+        html = self.templates.render(template_name, **ctx)
+        return Response(html, status=status)
+
+    # -- static files ------------------------------------------------------- #
+    def static(self, url_prefix, directory):
+        directory = os.path.abspath(directory)
+        prefix = url_prefix.rstrip("/")
+
+        @self.route(prefix + "/<path:relpath>", sitemap=False)
+        def _serve(req):
+            rel = req.params["relpath"]
+            full = os.path.abspath(os.path.join(directory, rel))
+            if not full.startswith(directory + os.sep) or not os.path.isfile(full):
+                return Response("not found", status=404)          # traversal guard
+            ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+            with open(full, "rb") as f:
+                data = f.read()
+            return Response(data, headers={"Cache-Control": "public, max-age=3600"},
+                            content_type=ctype)
+        return self
+
+    # -- middleware --------------------------------------------------------- #
+    def use(self, mw):
+        """Register middleware: a before-hook (req), an after-hook (req, resp),
+        or an object/func carrying an `.after` attribute (e.g. CSRF)."""
+        after = getattr(mw, "after", None)
+        try:
+            argc = len(inspect.signature(mw).parameters)
+        except (TypeError, ValueError):
+            argc = 1
+        if argc >= 2 and after is None:
+            self._after.append(mw)
+        else:
+            self._before.append(mw)
+            if after:
+                self._after.append(after)
+        return mw
 
     def get(self, pattern, **opts):
         return self.route(pattern, ("GET",), **opts)
@@ -227,11 +310,24 @@ class Larz:
         return deco
 
     # -- money-native decorators (metadata only; enforced in dispatch) ------ #
-    def paid(self, price, sku=None, days=None):
-        """Gate a route behind a one-off or subscription payment."""
-        spec = {"price": price, "sku": sku, "days": days}
+    def paid(self, price, sku=None, days=None, trial_days=None, plan=None):
+        """Gate a route behind a one-off, subscription, or trial payment.
+
+        price       "$9"  one-off  |  "$9/mo" / "$99/yr" subscription
+        trial_days  grant a free trial on first access before charging
+        plan        name of a registered plan (groups routes under one sku)
+        """
+        spec = {"price": price, "sku": sku, "days": days,
+                "trial_days": trial_days, "plan": plan}
         def deco(fn):
             fn._larz_paid = spec
+            return fn
+        return deco
+
+    def plan(self, name):
+        """Gate a route on membership of a registered plan (see app.money.plan)."""
+        def deco(fn):
+            fn._larz_plan = name
             return fn
         return deco
 
@@ -286,11 +382,16 @@ class Larz:
             if gate is not None:
                 return self._coerce(gate)
 
+        plan = getattr(handler, "_larz_plan", None)
+        if plan and self.money:
+            gate = self.money.enforce_plan(req, plan, route)
+            if gate is not None:
+                return self._coerce(gate)
+
         try:
             return self._coerce(handler(req))
         except Exception as exc:  # noqa
-            import traceback
-            traceback.print_exc()
+            _traceback.print_exc()
             return self._error(500, req, exc)
 
     def _coerce(self, out):
@@ -305,6 +406,13 @@ class Larz:
         h = self._error_handlers.get(code)
         if h:
             return self._coerce(h(req))
+        if code == 500 and self.debug and exc is not None:
+            import html as _html
+            tb = _html.escape(_traceback.format_exc())
+            body = ("<h1>500 — %s</h1><p>%s</p><pre style='background:#f6f6f6;"
+                    "padding:1em;overflow:auto'>%s</pre>"
+                    % (type(exc).__name__, _html.escape(str(exc)), tb))
+            return Response(body, status=500)
         msgs = {404: "Not Found", 405: "Method Not Allowed",
                 500: "Internal Server Error"}
         return Response("%d %s" % (code, msgs.get(code, "Error")), status=code)

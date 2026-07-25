@@ -1,48 +1,48 @@
 """
 larz.money — the money-native layer.
 
-This is what makes Larz different: payments, paywalls, and usage-metering are
-framework primitives, not something you bolt on later.
+What makes Larz different: payments, paywalls, subscriptions, trials, coupons,
+usage-metering, credit packs, and a revenue dashboard are framework primitives.
 
-  * EntitlementStore  — who has paid for what (stdlib sqlite3, zero-dep).
-  * PaymentProvider   — pluggable checkout backends. Ships with:
-        MockProvider   (fully local; makes the demo runnable with no keys)
-        StripeProvider (real REST via urllib; no `stripe` SDK dependency)
-    …and the estate can drop in a GemVaultProvider / DodoProvider the same way.
-  * @app.paid / @app.metered enforcement, wired into core.dispatch().
+    money.enable(app, provider=StripeProvider(...), base_url="https://you.com")
 
-Design: a route decorated @app.paid gates on an *entitlement*; if the caller
-isn't entitled, Larz sends them to the provider's checkout. The provider's
-webhook (or the mock confirm URL) grants the entitlement, and the caller lands
-back on the original page — now served.
+    @app.paid("$9")                       one-off unlock
+    @app.paid("$9/mo", trial_days=7)      subscription with a free trial
+    @app.plan("pro")                      gate on a named plan (app.money.plan)
+    @app.metered("$0.02/call")            per-call billing from prepaid credit
+
+Built-in routes (auto-registered):
+    /larz/pricing              plans + credit packs, with checkout links
+    /larz/credits              balance + buyable credit packs
+    /larz/checkout/mock        dev checkout (MockProvider)
+    /larz/webhook/<provider>   payment webhook -> grant entitlement / add credit
+    /larz/admin?token=...      revenue dashboard (MRR, sales, usage)
 """
 
 import time
-import json
-import hmac
-import hashlib
 import sqlite3
-import urllib.parse
-import urllib.request
 from .core import Response
+# providers live in their own module now; re-export for backwards-compat.
+from .providers import (PaymentProvider, MockProvider, StripeProvider,      # noqa
+                        GemVaultProvider, DodoProvider, CryptoProvider)
 
-__all__ = ["enable", "PaymentProvider", "MockProvider", "StripeProvider"]
+__all__ = ["enable", "parse_price", "EntitlementStore",
+           "PaymentProvider", "MockProvider", "StripeProvider",
+           "GemVaultProvider", "DodoProvider", "CryptoProvider"]
+
+_INTERVAL_DAYS = {"day": 1, "wk": 7, "week": 7, "mo": 30, "month": 30,
+                  "yr": 365, "year": 365}
 
 
-# --------------------------------------------------------------------------- #
-#  price parsing:  "$9/mo"  "$0.02/call"  "$49"  ->  (amount_cents, interval)
-# --------------------------------------------------------------------------- #
 def parse_price(price):
+    """'$9/mo' -> (900, 'mo');  '$0.02/call' -> (2, 'call');  4.5 -> (450, None)."""
     if isinstance(price, (int, float)):
         return int(round(price * 100)), None
     s = str(price).strip().lstrip("$")
     amount, _, interval = s.partition("/")
-    cents = int(round(float(amount) * 100))
-    return cents, (interval or None)
+    return int(round(float(amount) * 100)), (interval or None)
 
 
-# --------------------------------------------------------------------------- #
-#  Entitlement store  (sqlite, stdlib)
 # --------------------------------------------------------------------------- #
 class EntitlementStore:
     def __init__(self, path="larz_money.db"):
@@ -67,17 +67,38 @@ class EntitlementStore:
             CREATE TABLE IF NOT EXISTS payments(
               id TEXT PRIMARY KEY, subject TEXT, sku TEXT, cents INTEGER,
               provider TEXT, status TEXT, created_at REAL);
+            CREATE TABLE IF NOT EXISTS trials(
+              subject TEXT, sku TEXT, started_at REAL, PRIMARY KEY(subject, sku));
+            CREATE TABLE IF NOT EXISTS coupons(
+              code TEXT PRIMARY KEY, percent_off INTEGER DEFAULT 0,
+              amount_off_cents INTEGER DEFAULT 0, expires_at REAL,
+              max_redemptions INTEGER, redemptions INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS sku_meta(sku TEXT PRIMARY KEY, interval TEXT);
             """)
+
+    # sku metadata (so the webhook knows a sku's billing interval) --------- #
+    def set_interval(self, sku, interval):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO sku_meta(sku,interval) VALUES(?,?)",
+                      (sku, interval))
+
+    def get_interval(self, sku):
+        with self._conn() as c:
+            row = c.execute("SELECT interval FROM sku_meta WHERE sku=?", (sku,)).fetchone()
+        return row["interval"] if row else None
 
     # entitlements -------------------------------------------------------- #
     def grant(self, subject, sku, days=None):
-        # portable across all SQLite versions (no UPSERT / ON CONFLICT DO UPDATE).
         now = time.time()
         expires = now + days * 86400 if days else None
         with self._conn() as c:
             c.execute("INSERT OR REPLACE INTO entitlements"
                       "(subject,sku,expires_at,created_at) VALUES(?,?,?,?)",
                       (subject, sku, expires, now))
+
+    def revoke(self, subject, sku):
+        with self._conn() as c:
+            c.execute("DELETE FROM entitlements WHERE subject=? AND sku=?", (subject, sku))
 
     def is_entitled(self, subject, sku):
         with self._conn() as c:
@@ -87,12 +108,30 @@ class EntitlementStore:
             return False
         return row["expires_at"] is None or row["expires_at"] > time.time()
 
+    def expires_at(self, subject, sku):
+        with self._conn() as c:
+            row = c.execute("SELECT expires_at FROM entitlements WHERE subject=? AND sku=?",
+                            (subject, sku)).fetchone()
+        return row["expires_at"] if row else None
+
+    # trials -------------------------------------------------------------- #
+    def trial_available(self, subject, sku):
+        with self._conn() as c:
+            row = c.execute("SELECT 1 FROM trials WHERE subject=? AND sku=?",
+                            (subject, sku)).fetchone()
+        return row is None
+
+    def start_trial(self, subject, sku, days):
+        with self._conn() as c:
+            c.execute("INSERT OR IGNORE INTO trials(subject,sku,started_at) VALUES(?,?,?)",
+                      (subject, sku, time.time()))
+        self.grant(subject, sku, days=days)
+
     # credits / metering -------------------------------------------------- #
     def add_credit(self, subject, cents):
-        # portable increment: UPDATE, then INSERT only if the row was missing.
         with self._conn() as c:
-            cur = c.execute("UPDATE credits SET balance_cents=balance_cents+? "
-                            "WHERE subject=?", (cents, subject))
+            cur = c.execute("UPDATE credits SET balance_cents=balance_cents+? WHERE subject=?",
+                            (cents, subject))
             if cur.rowcount == 0:
                 c.execute("INSERT INTO credits(subject,balance_cents) VALUES(?,?)",
                           (subject, cents))
@@ -104,7 +143,6 @@ class EntitlementStore:
         return row["balance_cents"] if row else 0
 
     def charge(self, subject, cents, sku):
-        """Atomically debit prepaid credit; returns True if funded."""
         with self._conn() as c:
             row = c.execute("SELECT balance_cents FROM credits WHERE subject=?",
                             (subject,)).fetchone()
@@ -123,169 +161,237 @@ class EntitlementStore:
                       "(id,subject,sku,cents,provider,status,created_at) VALUES(?,?,?,?,?,?,?)",
                       (pid, subject, sku, cents, provider, status, time.time()))
 
+    # coupons ------------------------------------------------------------- #
+    def add_coupon(self, code, percent_off=0, amount_off_cents=0,
+                   days_valid=None, max_redemptions=None):
+        expires = time.time() + days_valid * 86400 if days_valid else None
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO coupons"
+                      "(code,percent_off,amount_off_cents,expires_at,max_redemptions,redemptions)"
+                      " VALUES(?,?,?,?,?,COALESCE((SELECT redemptions FROM coupons WHERE code=?),0))",
+                      (code, percent_off, amount_off_cents, expires, max_redemptions, code))
 
-# --------------------------------------------------------------------------- #
-#  Payment providers
-# --------------------------------------------------------------------------- #
-class PaymentProvider:
-    """Implement these two methods to plug any processor into Larz."""
-    name = "base"
+    def apply_coupon(self, code, cents):
+        """Return (discounted_cents, ok). Does not consume a redemption."""
+        if not code:
+            return cents, False
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM coupons WHERE code=?", (code,)).fetchone()
+        if not row:
+            return cents, False
+        if row["expires_at"] and row["expires_at"] < time.time():
+            return cents, False
+        if (row["max_redemptions"] is not None
+                and row["redemptions"] >= row["max_redemptions"]):
+            return cents, False
+        out = cents
+        if row["percent_off"]:
+            out = int(round(out * (100 - row["percent_off"]) / 100.0))
+        out -= row["amount_off_cents"] or 0
+        return max(0, out), True
 
-    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
-        raise NotImplementedError
+    def redeem_coupon(self, code):
+        with self._conn() as c:
+            c.execute("UPDATE coupons SET redemptions=redemptions+1 WHERE code=?", (code,))
 
-    def parse_webhook(self, req):
-        """Return {'subject','sku','cents','payment_id'} for a completed payment, else None."""
-        raise NotImplementedError
-
-
-class MockProvider(PaymentProvider):
-    """Local, keyless provider so the demo runs end-to-end offline.
-
-    'Checkout' is a signed local URL; hitting it simulates a completed payment.
-    Never use in production — it's the dev/test default."""
-    name = "mock"
-
-    def __init__(self, secret="mock"):
-        self.secret = secret.encode()
-
-    def _sig(self, subject, sku, cents):
-        raw = ("%s|%s|%d" % (subject, sku, cents)).encode()
-        return hmac.new(self.secret, raw, hashlib.sha256).hexdigest()[:16]
-
-    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
-        q = urllib.parse.urlencode({
-            "subject": subject, "sku": sku, "cents": cents,
-            "sig": self._sig(subject, sku, cents), "next": success_url})
-        return "/larz/checkout/mock?" + q
-
-    def confirm(self, req):
-        q = req.query
-        subject, sku, cents = q.get("subject"), q.get("sku"), int(q.get("cents", 0))
-        if self._sig(subject, sku, cents) != q.get("sig"):
-            return None
-        return {"subject": subject, "sku": sku, "cents": cents,
-                "payment_id": "mock_%d" % int(time.time()), "next": q.get("next", "/")}
-
-
-class StripeProvider(PaymentProvider):
-    """Real Stripe Checkout via the REST API using stdlib urllib — no SDK.
-
-    Untested against live keys here, but the wire calls are correct; set
-    api_key + webhook_secret and it should work. Demonstrates that a real
-    provider is a ~40-line drop-in."""
-    name = "stripe"
-
-    def __init__(self, api_key, webhook_secret=None):
-        self.api_key = api_key
-        self.webhook_secret = webhook_secret
-
-    def _post(self, path, fields):
-        data = urllib.parse.urlencode(fields, doseq=True).encode()
-        r = urllib.request.Request("https://api.stripe.com/v1/" + path, data=data,
-                                   headers={"Authorization": "Bearer " + self.api_key})
-        with urllib.request.urlopen(r, timeout=20) as resp:
-            return json.loads(resp.read().decode())
-
-    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
-        session = self._post("checkout/sessions", {
-            "mode": "payment",
-            "success_url": success_url,
-            "cancel_url": cancel_url,
-            "client_reference_id": subject,
-            "metadata[sku]": sku,
-            "line_items[0][price_data][currency]": "usd",
-            "line_items[0][price_data][product_data][name]": sku,
-            "line_items[0][price_data][unit_amount]": cents,
-            "line_items[0][quantity]": 1,
-        })
-        return session["url"]
-
-    def parse_webhook(self, req):
-        event = req.json() or {}
-        if event.get("type") != "checkout.session.completed":
-            return None
-        obj = event["data"]["object"]
-        return {"subject": obj.get("client_reference_id"),
-                "sku": (obj.get("metadata") or {}).get("sku"),
-                "cents": obj.get("amount_total", 0),
-                "payment_id": obj.get("id")}
+    # analytics ----------------------------------------------------------- #
+    def stats(self):
+        with self._conn() as c:
+            rev = c.execute("SELECT COALESCE(SUM(cents),0) s, COUNT(*) n FROM payments "
+                            "WHERE status='paid'").fetchone()
+            active_subs = c.execute(
+                "SELECT COUNT(*) n FROM entitlements WHERE expires_at IS NOT NULL "
+                "AND expires_at > ?", (time.time(),)).fetchone()["n"]
+            outstanding = c.execute("SELECT COALESCE(SUM(balance_cents),0) s "
+                                    "FROM credits").fetchone()["s"]
+            recent = c.execute("SELECT id,subject,sku,cents,provider,created_at "
+                               "FROM payments WHERE status='paid' "
+                               "ORDER BY created_at DESC LIMIT 10").fetchall()
+            top_usage = c.execute("SELECT sku, COUNT(*) calls, COALESCE(SUM(cents),0) cents "
+                                  "FROM usage GROUP BY sku ORDER BY cents DESC LIMIT 10").fetchall()
+        return {"revenue_cents": rev["s"], "payments": rev["n"],
+                "active_subscriptions": active_subs,
+                "outstanding_credit_cents": outstanding,
+                "recent": [dict(r) for r in recent],
+                "top_usage": [dict(r) for r in top_usage]}
 
 
-# --------------------------------------------------------------------------- #
-#  The money engine attached to the app  (app.money)
 # --------------------------------------------------------------------------- #
 class _Money:
-    def __init__(self, app, provider, store, base_url):
+    def __init__(self, app, provider, store, base_url, admin_token=None):
         self.app = app
         self.provider = provider
         self.store = store
         self.base_url = base_url.rstrip("/")
+        self.admin_token = admin_token
+        self.plans = {}        # name -> {sku, cents, interval, features, trial_days}
+        self.packs = {}        # name -> {price_cents, credit_cents, label}
         self._install_routes()
 
+    # registration -------------------------------------------------------- #
+    def plan(self, name, price, features=None, trial_days=None):
+        cents, interval = parse_price(price)
+        self.plans[name] = {"sku": "plan:" + name, "cents": cents, "interval": interval,
+                            "features": features or [], "trial_days": trial_days,
+                            "price": price}
+        return self
+
+    def credit_pack(self, name, price, credit, label=None):
+        pcents, _ = parse_price(price)
+        ccents, _ = parse_price(credit)
+        self.packs[name] = {"price_cents": pcents, "credit_cents": ccents,
+                            "label": label or name, "price": price}
+        return self
+
     def _sku_for(self, spec, route):
+        if spec.get("plan"):
+            return "plan:" + spec["plan"]
         return spec.get("sku") or route.pattern.strip("/").replace("/", ":") or "root"
+
+    def _checkout(self, req, subject, sku, cents, success_path=None):
+        cents2, ok = self.store.apply_coupon(req.query.get("coupon"), cents)
+        success = self.base_url + (success_path or req.path)
+        cancel = self.base_url + "/larz/pricing"
+        return self.provider.create_checkout(subject, sku, cents2, success, cancel)
 
     # enforcement (called from core.dispatch) ----------------------------- #
     def enforce_paid(self, req, spec, route):
         subject = req.subject
         sku = self._sku_for(spec, route)
         if self.store.is_entitled(subject, sku):
-            return None                      # already paid → serve the route
-        cents, _ = parse_price(spec["price"])
-        success = self.base_url + req.path
-        cancel = self.base_url + "/"
-        url = self.provider.create_checkout(subject, sku, cents, success, cancel)
-        return Response.redirect(url)        # not paid → go to checkout
+            return None
+        cents, interval = parse_price(spec["price"])
+        if interval:
+            self.store.set_interval(sku, interval)   # remember for the webhook
+        # free trial on first access
+        if spec.get("trial_days") and self.store.trial_available(subject, sku):
+            self.store.start_trial(subject, sku, spec["trial_days"])
+            return None
+        return Response.redirect(self._checkout(req, subject, sku, cents))
+
+    def enforce_plan(self, req, plan_name, route):
+        plan = self.plans.get(plan_name)
+        if not plan:
+            return Response("unknown plan '%s'" % plan_name, status=500)
+        subject = req.subject
+        if self.store.is_entitled(subject, plan["sku"]):
+            return None
+        if plan["interval"]:
+            self.store.set_interval(plan["sku"], plan["interval"])
+        if plan["trial_days"] and self.store.trial_available(subject, plan["sku"]):
+            self.store.start_trial(subject, plan["sku"], plan["trial_days"])
+            return None
+        return Response.redirect(self._checkout(req, subject, plan["sku"], plan["cents"]))
 
     def enforce_metered(self, req, spec, route):
         subject = req.subject
         sku = self._sku_for(spec, route)
         cents, _ = parse_price(spec["price"])
         if self.store.charge(subject, cents, sku):
-            return None                      # funded → serve
+            return None
         return Response.json(
             {"error": "payment_required", "sku": sku, "price_cents": cents,
              "balance_cents": self.store.balance(subject),
              "top_up": self.base_url + "/larz/credits"}, status=402)
 
+    # webhook handling: grant entitlement, or add credit for credit-packs -- #
+    def _fulfil(self, result, provider_name):
+        subject, sku, cents = result["subject"], result["sku"], result["cents"]
+        if sku and sku.startswith("credits:"):
+            pack = self.packs.get(sku.split(":", 1)[1])
+            self.store.add_credit(subject, pack["credit_cents"] if pack else cents)
+        else:
+            interval = self.store.get_interval(sku)
+            if not interval:
+                plan = next((p for p in self.plans.values() if p["sku"] == sku), None)
+                interval = plan["interval"] if plan else None
+            days = _INTERVAL_DAYS.get(interval) if interval else None
+            self.store.grant(subject, sku, days=days)
+        self.store.record_payment(result["payment_id"], subject, sku, cents, provider_name)
+
     # built-in routes ----------------------------------------------------- #
     def _install_routes(self):
         app = self.app
 
-        @app.get("/larz/checkout/mock")
+        @app.get("/larz/checkout/mock", sitemap=False)
         def _mock_confirm(req):
             if not isinstance(self.provider, MockProvider):
                 return Response("mock checkout disabled", status=404)
             result = self.provider.confirm(req)
             if not result:
                 return Response("bad signature", status=400)
-            self.store.grant(result["subject"], result["sku"])
-            self.store.record_payment(result["payment_id"], result["subject"],
-                                      result["sku"], result["cents"], "mock")
+            if req.query.get("coupon"):
+                self.store.redeem_coupon(req.query.get("coupon"))
+            self._fulfil(result, "mock")
             return Response.redirect(result.get("next", "/"))
 
-        @app.post("/larz/webhook/<provider>")
+        @app.post("/larz/webhook/<provider>", sitemap=False)
         def _webhook(req):
             result = self.provider.parse_webhook(req)
             if not result:
                 return Response("ignored", status=200)
-            days = None
-            self.store.grant(result["subject"], result["sku"], days=days)
-            self.store.record_payment(result["payment_id"], result["subject"],
-                                      result["sku"], result["cents"], self.provider.name)
+            self._fulfil(result, self.provider.name)
             return Response("ok", status=200)
 
-        @app.get("/larz/credits")
+        @app.get("/larz/credits", sitemap=False)
         def _credits(req):
-            return Response.json({"subject": req.subject,
-                                  "balance_cents": self.store.balance(req.subject)})
+            if req.query.get("format") == "json" or "application/json" in (req.header("Accept") or ""):
+                return Response.json({"subject": req.subject,
+                                      "balance_cents": self.store.balance(req.subject)})
+            packs = "".join(
+                "<li>%s — <a href='/larz/credits/buy/%s'>buy for %s</a> "
+                "(+%d credits)</li>" % (p["label"], n, p["price"], p["credit_cents"])
+                for n, p in self.packs.items())
+            return Response(
+                "<h1>Credits</h1><p>Balance: <b>%d</b> cents</p><ul>%s</ul>"
+                % (self.store.balance(req.subject), packs or "<li>No packs configured</li>"))
+
+        @app.get("/larz/credits/buy/<pack>", sitemap=False)
+        def _buy_credits(req):
+            pack = self.packs.get(req.params["pack"])
+            if not pack:
+                return Response("no such pack", status=404)
+            url = self._checkout(req, req.subject, "credits:" + req.params["pack"],
+                                 pack["price_cents"], success_path="/larz/credits")
+            return Response.redirect(url)
+
+        @app.get("/larz/pricing", sitemap=False)
+        def _pricing(req):
+            rows = []
+            for name, p in self.plans.items():
+                feats = "".join("<li>%s</li>" % f for f in p["features"])
+                trial = " (%d-day free trial)" % p["trial_days"] if p["trial_days"] else ""
+                rows.append("<div class='plan'><h2>%s — %s%s</h2><ul>%s</ul></div>"
+                            % (name.title(), p["price"], trial, feats))
+            return Response("<h1>Pricing</h1>" + ("".join(rows) or "<p>No plans yet</p>"))
+
+        @app.get("/larz/admin", sitemap=False)
+        def _admin(req):
+            if self.admin_token and req.query.get("token") != self.admin_token:
+                return Response("forbidden", status=403)
+            s = self.store.stats()
+            recent = "".join(
+                "<tr><td>%s</td><td>%s</td><td>$%.2f</td><td>%s</td></tr>"
+                % (r["subject"][:12], r["sku"], r["cents"] / 100.0, r["provider"])
+                for r in s["recent"])
+            usage = "".join("<tr><td>%s</td><td>%d</td><td>$%.2f</td></tr>"
+                            % (u["sku"], u["calls"], u["cents"] / 100.0)
+                            for u in s["top_usage"])
+            return Response(
+                "<h1>Larz — Revenue</h1>"
+                "<p>Total revenue: <b>$%.2f</b> across %d payments</p>"
+                "<p>Active subscriptions: <b>%d</b></p>"
+                "<p>Outstanding credit liability: $%.2f</p>"
+                "<h2>Recent payments</h2><table border=1>%s</table>"
+                "<h2>Top metered usage</h2><table border=1>%s</table>"
+                % (s["revenue_cents"] / 100.0, s["payments"], s["active_subscriptions"],
+                   s["outstanding_credit_cents"] / 100.0, recent, usage))
 
 
-def enable(app, provider=None, db="larz_money.db", base_url="http://127.0.0.1:8000"):
+def enable(app, provider=None, db="larz_money.db",
+           base_url="http://127.0.0.1:8000", admin_token=None):
     """Turn on the money-native layer for an app."""
     provider = provider or MockProvider()
     store = EntitlementStore(db)
-    app.money = _Money(app, provider, store, base_url)
-    app.money.store = store
+    app.money = _Money(app, provider, store, base_url, admin_token=admin_token)
     return app.money
