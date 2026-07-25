@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "larz"
+version = "0.1.0"
+description = "The money-native web framework — payments, paywalls and metering as first-class primitives. Zero dependencies."
+readme = "README.md"
+requires-python = ">=3.6"
+license = { text = "MIT" }
+authors = [{ name = "Larz" }]
+keywords = ["web", "framework", "payments", "paywall", "metering", "stripe", "monetization", "wsgi"]
+classifiers = [
+  "Framework :: Larz",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+  "Topic :: Office/Business :: Financial",
+]
+dependencies = []            # zero runtime dependencies, by design
+
+[project.urls]
+Homepage = "https://larzos.com/larz"
+
+[tool.setuptools.packages.find]
+include = ["larz*"]
