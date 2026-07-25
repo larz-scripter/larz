@@ -12,7 +12,6 @@ license = { text = "MIT" }
 authors = [{ name = "Larz" }]
 keywords = ["web", "framework", "payments", "paywall", "metering", "stripe", "monetization", "wsgi"]
 classifiers = [
-  "Framework :: Larz",
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
   "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
