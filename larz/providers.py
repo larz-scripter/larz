@@ -24,7 +24,9 @@ import urllib.parse
 import urllib.request
 
 __all__ = ["PaymentProvider", "MockProvider", "StripeProvider",
-           "GemVaultProvider", "DodoProvider", "CryptoProvider"]
+           "GemVaultProvider", "DodoProvider", "CryptoProvider",
+           "PaddleProvider", "LemonSqueezyProvider", "PaystackProvider",
+           "PayPalProvider"]
 
 
 class PaymentProvider:
@@ -240,3 +242,150 @@ class CryptoProvider(PaymentProvider):
         return {"subject": subject, "sku": sku,
                 "cents": int(round(float(e.get("price_amount", 0)) * 100)),
                 "payment_id": str(e.get("payment_id"))}
+
+
+# --------------------------------------------------------------------------- #
+class PaddleProvider(PaymentProvider):
+    """Paddle Billing hosted checkout (transactions API) + signed webhook."""
+    name = "paddle"
+
+    def __init__(self, api_key, webhook_secret, price_id=None,
+                 api_base="https://api.paddle.com"):
+        self.api_key = api_key
+        self.webhook_secret = webhook_secret
+        self.price_id = price_id
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/transactions", {
+            "items": [{"price_id": self.price_id or sku, "quantity": 1}],
+            "custom_data": {"subject": subject, "sku": sku},
+            "checkout": {"url": success_url}},
+            headers={"Authorization": "Bearer " + self.api_key})
+        return resp.get("data", {}).get("checkout", {}).get("url", success_url)
+
+    def parse_webhook(self, req):
+        sig = req.header("Paddle-Signature") or ""
+        digest = hmac.new(self.webhook_secret.encode(), req.body, hashlib.sha256).hexdigest()
+        if digest not in sig:
+            return None
+        e = req.json() or {}
+        if e.get("event_type") not in ("transaction.completed", "transaction.paid"):
+            return None
+        d = e.get("data", {})
+        cd = d.get("custom_data") or {}
+        total = int(float(d.get("details", {}).get("totals", {}).get("total", 0)))
+        return {"subject": cd.get("subject"), "sku": cd.get("sku"),
+                "cents": total, "payment_id": d.get("id")}
+
+
+class LemonSqueezyProvider(PaymentProvider):
+    """Lemon Squeezy checkout + signed webhook (X-Signature HMAC over body)."""
+    name = "lemonsqueezy"
+
+    def __init__(self, api_key, webhook_secret, store_id, variant_id,
+                 api_base="https://api.lemonsqueezy.com/v1"):
+        self.api_key = api_key
+        self.webhook_secret = webhook_secret
+        self.store_id = store_id
+        self.variant_id = variant_id
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/checkouts", {
+            "data": {"type": "checkouts",
+                     "attributes": {"checkout_data": {"custom": {"subject": subject, "sku": sku}}},
+                     "relationships": {
+                         "store": {"data": {"type": "stores", "id": str(self.store_id)}},
+                         "variant": {"data": {"type": "variants", "id": str(self.variant_id)}}}}},
+            headers={"Authorization": "Bearer " + self.api_key,
+                     "Accept": "application/vnd.api+json"})
+        return resp.get("data", {}).get("attributes", {}).get("url", success_url)
+
+    def parse_webhook(self, req):
+        sig = req.header("X-Signature") or ""
+        expected = hmac.new(self.webhook_secret.encode(), req.body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        e = req.json() or {}
+        if e.get("meta", {}).get("event_name") != "order_created":
+            return None
+        custom = e.get("meta", {}).get("custom_data", {})
+        attrs = e.get("data", {}).get("attributes", {})
+        return {"subject": custom.get("subject"), "sku": custom.get("sku"),
+                "cents": attrs.get("total", 0), "payment_id": str(e.get("data", {}).get("id"))}
+
+
+class PaystackProvider(PaymentProvider):
+    """Paystack (popular in Africa) initialize + webhook (x-paystack-signature)."""
+    name = "paystack"
+
+    def __init__(self, secret_key, api_base="https://api.paystack.co"):
+        self.secret_key = secret_key
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/transaction/initialize", {
+            "email": subject if "@" in (subject or "") else subject + "@example.com",
+            "amount": cents, "callback_url": success_url,
+            "metadata": {"subject": subject, "sku": sku}},
+            headers={"Authorization": "Bearer " + self.secret_key})
+        return resp.get("data", {}).get("authorization_url", success_url)
+
+    def parse_webhook(self, req):
+        sig = req.header("x-paystack-signature") or ""
+        expected = hmac.new(self.secret_key.encode(), req.body, hashlib.sha512).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        e = req.json() or {}
+        if e.get("event") != "charge.success":
+            return None
+        d = e.get("data", {})
+        meta = d.get("metadata") or {}
+        return {"subject": meta.get("subject"), "sku": meta.get("sku"),
+                "cents": d.get("amount", 0), "payment_id": d.get("reference")}
+
+
+class PayPalProvider(PaymentProvider):
+    """PayPal Orders v2 (create order -> approve link) + webhook.
+    Webhook signature verification requires a PayPal API call; here we accept
+    COMPLETED capture events and trust HTTPS + the resource id."""
+    name = "paypal"
+
+    def __init__(self, client_id, secret, api_base="https://api-m.paypal.com"):
+        self.client_id = client_id
+        self.secret = secret
+        self.api_base = api_base.rstrip("/")
+
+    def _token(self):
+        import base64 as _b64
+        auth = _b64.b64encode(("%s:%s" % (self.client_id, self.secret)).encode()).decode()
+        data = b"grant_type=client_credentials"
+        r = urllib.request.Request(self.api_base + "/v1/oauth2/token", data=data,
+                                   headers={"Authorization": "Basic " + auth})
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            return json.loads(resp.read().decode())["access_token"]
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        order = _post_json(self.api_base + "/v2/checkout/orders", {
+            "intent": "CAPTURE",
+            "purchase_units": [{"custom_id": "%s|%s" % (subject, sku),
+                                "amount": {"currency_code": "USD",
+                                           "value": "%.2f" % (cents / 100.0)}}],
+            "application_context": {"return_url": success_url, "cancel_url": cancel_url}},
+            headers={"Authorization": "Bearer " + self._token()})
+        for link in order.get("links", []):
+            if link.get("rel") == "approve":
+                return link["href"]
+        return success_url
+
+    def parse_webhook(self, req):
+        e = req.json() or {}
+        if e.get("event_type") not in ("PAYMENT.CAPTURE.COMPLETED", "CHECKOUT.ORDER.APPROVED"):
+            return None
+        res = e.get("resource", {})
+        custom = res.get("custom_id", "")
+        subject, _, sku = custom.partition("|")
+        amt = res.get("amount", {}).get("value", "0")
+        return {"subject": subject, "sku": sku,
+                "cents": int(round(float(amt) * 100)), "payment_id": res.get("id")}

@@ -46,14 +46,16 @@ never write `if user.is_paid`.
 
 | Area | What you get |
 |---|---|
-| **Money** | `@app.paid` · `@app.metered` · `@app.plan` · subscriptions & renewals · free trials · coupons · credit packs · built-in `/larz/pricing`, `/larz/credits`, and a `/larz/admin` **revenue dashboard** (MRR, sales, usage) |
-| **Providers** | `MockProvider` (keyless dev) · `StripeProvider` · `GemVaultProvider` · `DodoProvider` · `CryptoProvider` — all via stdlib `urllib`, **no SDKs**. Add your own in ~40 lines. |
-| **Core** | WSGI engine · typed routing (`/u/<id:int>/<slug>`) · signed-cookie sessions · blueprints · static files · debug error pages |
-| **Templating** | A real `{{ }}` / `{% for %}` / `{% if %}` engine with autoescaping |
-| **Models** | A tiny active-record ORM over sqlite (`Model` / `Field`, queries, ordering) |
-| **Security** | Rate limiting · bot / invalid-traffic filter · CSRF · CORS |
-| **SEO** | Auto `sitemap.xml` + `robots.txt` · OpenGraph/Twitter `meta_tags()` · IndexNow ping |
-| **CLI** | `larz new` · `larz run` · `larz routes` |
+| **Money** | `@app.paid` · `@app.metered` · `@app.plan` · subscriptions, renewals, **cancel + dunning** · free trials · coupons · credit packs · **invoices/receipts** · **customer portal** (`/larz/account`) · entitlement events · `/larz/admin` **revenue dashboard** |
+| **Providers** | Mock · **Stripe · Paddle · Lemon Squeezy · Paystack · PayPal** · GemVault · Dodo · Crypto — all via stdlib `urllib`, **no SDKs**. Add your own in ~40 lines. |
+| **Auth** | `larz.auth` — users, scrypt passwords, `@app.login_required`, `req.user`, **API keys** (`@app.api_key_required`, plan-gated), **RBAC** (`@app.require_role`), email-verify + password-reset tokens |
+| **API tooling** | `@app.validate(schema)` · **auto OpenAPI** (`/openapi.json` + `/docs`) · `paginate()` · a **webhooks** framework (sign, deliver, retry) |
+| **ORM** | `larz.models` — relationships (`ForeignKey`), field types (datetime/json/decimal…), query operators (`views__gt`, `title__like`), pagination, hooks, transactions, auto-migrations |
+| **Admin** | `larz.admin` — an auto-generated **CRUD admin panel** over your models |
+| **Ops** | `larz.ops` — `@app.cache` · **background jobs** (`@app.job`) · **cron scheduler** (`@app.schedule`) · email (SMTP) · `.env` config · `/healthz` + `/metrics` |
+| **Templating** | `{{ }}` / `{% for %}` / `{% if %}` · **inheritance** (`{% extends %}`/`{% block %}`) · **filters** (`|upper`, `|currency`, `|date`…) · autoescaping |
+| **Core** | WSGI engine · typed routing · signed-cookie sessions · blueprints · static files · debug pages |
+| **Security · SEO · CLI** | Rate limiting, bot filter, CSRF, CORS · auto sitemap/robots + OpenGraph + IndexNow · `larz new / run / routes` |
 
 ## Why
 
@@ -106,7 +108,7 @@ cd myapp && python3 -m larz run
 
 ## Status
 
-v0.2.0 — real and tested, but not yet production-hardened (WSGI dev server,
+**v1.0.0** — real and tested, but not yet production-hardened (WSGI dev server,
 in-memory rate limiting, MockProvider is dev-only). Roadmap: ASGI/async core,
 production server recipe, dunning/renewal reminders, richer analytics, a hosted
 docs site at [larzos.com/larz](https://larzos.com/larz).

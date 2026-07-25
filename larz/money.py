@@ -34,6 +34,13 @@ _INTERVAL_DAYS = {"day": 1, "wk": 7, "week": 7, "mo": 30, "month": 30,
                   "yr": 365, "year": 365}
 
 
+def _fmt_ts(ts):
+    if not ts:
+        return "—"
+    import datetime
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
 def parse_price(price):
     """'$9/mo' -> (900, 'mo');  '$0.02/call' -> (2, 'call');  4.5 -> (450, None)."""
     if isinstance(price, (int, float)):
@@ -74,7 +81,28 @@ class EntitlementStore:
               amount_off_cents INTEGER DEFAULT 0, expires_at REAL,
               max_redemptions INTEGER, redemptions INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS sku_meta(sku TEXT PRIMARY KEY, interval TEXT);
+            CREATE TABLE IF NOT EXISTS invoices(
+              id TEXT PRIMARY KEY, subject TEXT, sku TEXT, cents INTEGER,
+              provider TEXT, created_at REAL);
             """)
+
+    # invoices ------------------------------------------------------------ #
+    def record_invoice(self, iid, subject, sku, cents, provider):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO invoices"
+                      "(id,subject,sku,cents,provider,created_at) VALUES(?,?,?,?,?,?)",
+                      (iid, subject, sku, cents, provider, time.time()))
+
+    def list_invoices(self, subject):
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM invoices WHERE subject=? "
+                             "ORDER BY created_at DESC", (subject,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_invoice(self, iid):
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM invoices WHERE id=?", (iid,)).fetchone()
+        return dict(row) if row else None
 
     # sku metadata (so the webhook knows a sku's billing interval) --------- #
     def set_interval(self, sku, interval):
@@ -226,7 +254,29 @@ class _Money:
         self.admin_token = admin_token
         self.plans = {}        # name -> {sku, cents, interval, features, trial_days}
         self.packs = {}        # name -> {price_cents, credit_cents, label}
+        self._on_grant = []    # callbacks(subject, sku)
+        self._on_revoke = []
         self._install_routes()
+
+    # -- entitlement events ------------------------------------------------ #
+    def on_grant(self, fn):
+        self._on_grant.append(fn); return fn
+
+    def on_revoke(self, fn):
+        self._on_revoke.append(fn); return fn
+
+    def cancel(self, subject, sku, immediate=False):
+        """Cancel a subscription. Default = at period end (keep until expiry);
+        immediate=True revokes access now."""
+        if immediate:
+            self.store.revoke(subject, sku)
+        else:
+            # stop it renewing: clear the stored interval so the next webhook
+            # (if any) grants no further time; access remains until expires_at.
+            self.store.set_interval(sku, "")
+        for fn in self._on_revoke:
+            try: fn(subject, sku)
+            except Exception: pass
 
     # registration -------------------------------------------------------- #
     def plan(self, name, price, features=None, trial_days=None):
@@ -331,7 +381,11 @@ class _Money:
                 interval = plan["interval"] if plan else None
             days = _INTERVAL_DAYS.get(interval) if interval else None
             self.store.grant(subject, sku, days=days)
+            for fn in self._on_grant:
+                try: fn(subject, sku)
+                except Exception: pass
         self.store.record_payment(result["payment_id"], subject, sku, cents, provider_name)
+        self.store.record_invoice(result["payment_id"], subject, sku, cents, provider_name)
 
     # built-in routes ----------------------------------------------------- #
     def _install_routes(self):
@@ -388,6 +442,55 @@ class _Money:
                 rows.append("<div class='plan'><h2>%s — %s%s</h2><ul>%s</ul></div>"
                             % (name.title(), p["price"], trial, feats))
             return Response("<h1>Pricing</h1>" + ("".join(rows) or "<p>No plans yet</p>"))
+
+        @app.get("/larz/account", sitemap=False)
+        def _account(req):
+            subject = req.subject
+            with self.store._conn() as c:
+                ents = c.execute("SELECT sku, expires_at FROM entitlements WHERE subject=?",
+                                 (subject,)).fetchall()
+            rows = "".join(
+                "<li><b>%s</b> %s "
+                "<form style='display:inline' method=post action='/larz/account/cancel'>"
+                "<input type=hidden name=sku value='%s'><button>Cancel</button></form></li>"
+                % (e["sku"], ("(active, renews %s)" % _fmt_ts(e["expires_at"]))
+                   if e["expires_at"] else "(active)", e["sku"])
+                for e in ents) or "<li>No active subscriptions.</li>"
+            invs = "".join("<tr><td>%s</td><td>%s</td><td>$%.2f</td>"
+                           "<td><a href='/larz/invoice/%s'>receipt</a></td></tr>"
+                           % (_fmt_ts(i["created_at"]), i["sku"], i["cents"] / 100.0, i["id"])
+                           for i in self.store.list_invoices(subject))
+            return Response(
+                "<h1>Your account</h1><p>Credit balance: <b>%d</b> cents</p>"
+                "<h2>Subscriptions</h2><ul>%s</ul>"
+                "<h2>Invoices</h2><table border=1>%s</table>"
+                "<p><a href='/larz/credits'>Buy credits</a> · "
+                "<a href='/larz/pricing'>Pricing</a></p>"
+                % (self.store.balance(subject), rows, invs or "<tr><td>none</td></tr>"))
+
+        @app.post("/larz/account/cancel", sitemap=False)
+        def _cancel(req):
+            sku = req.form.get("sku")
+            if sku:
+                self.cancel(req.subject, sku)
+            return Response.redirect("/larz/account")
+
+        @app.get("/larz/invoice/<iid>", sitemap=False)
+        def _invoice(req):
+            inv = self.store.get_invoice(req.params["iid"])
+            if not inv or inv["subject"] != req.subject:
+                return Response("not found", status=404)
+            return Response(
+                "<div style='font:15px system-ui;max-width:520px;margin:2rem auto'>"
+                "<h1>Receipt</h1><table>"
+                "<tr><td>Invoice</td><td><code>%s</code></td></tr>"
+                "<tr><td>Item</td><td>%s</td></tr>"
+                "<tr><td>Amount</td><td><b>$%.2f</b></td></tr>"
+                "<tr><td>Provider</td><td>%s</td></tr>"
+                "<tr><td>Date</td><td>%s</td></tr></table>"
+                "<p><a href='/larz/account'>← account</a></p></div>"
+                % (inv["id"], inv["sku"], inv["cents"] / 100.0, inv["provider"],
+                   _fmt_ts(inv["created_at"])))
 
         @app.get("/larz/admin", sitemap=False)
         def _admin(req):

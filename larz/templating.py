@@ -22,16 +22,59 @@ import html
 __all__ = ["Template", "Environment"]
 
 _TOKEN = re.compile(r"({{.*?}}|{%.*?%}|{#.*?#})", re.DOTALL)
+_BLOCK = re.compile(r"{%\s*block\s+(\w+)\s*%}(.*?){%\s*endblock\s*%}", re.DOTALL)
+_EXTENDS = re.compile(r'^\s*{%\s*extends\s+["\']([^"\']+)["\']\s*%}')
 
 
 def escape(value):
     return html.escape(str(value), quote=True)
 
 
+# --- template filters (used as `{{ x | upper }}`) ------------------------- #
+def _default(v, d=""):
+    return v if v not in (None, "") else d
+
+def _currency(v, symbol="$"):
+    return "%s%.2f" % (symbol, float(v))
+
+def _date(v, fmt="%Y-%m-%d"):
+    return v.strftime(fmt) if hasattr(v, "strftime") else str(v)
+
+FILTERS = {
+    "upper": lambda s: str(s).upper(),
+    "lower": lambda s: str(s).lower(),
+    "title": lambda s: str(s).title(),
+    "capitalize": lambda s: str(s).capitalize(),
+    "trim": lambda s: str(s).strip(),
+    "length": lambda s: len(s),
+    "default": _default,
+    "currency": _currency,
+    "date": _date,
+    "join": lambda s, sep=", ": sep.join(str(x) for x in s),
+    "round": lambda s, n=0: round(float(s), int(n)),
+    "truncate": lambda s, n=50: str(s) if len(str(s)) <= n else str(s)[:n] + "…",
+}
+
+
+def _resolve_inheritance(source, env):
+    """Resolve {% extends %} + {% block %} by merging with the parent template."""
+    m = _EXTENDS.match(source)
+    if not m:
+        # no inheritance: render each block's body inline (strip the tags)
+        return _BLOCK.sub(lambda mo: mo.group(2), source)
+    parent_name = m.group(1)
+    child_blocks = {name: body for name, body in _BLOCK.findall(source)}
+    parent_src = env.get_source(parent_name)
+    merged = _BLOCK.sub(lambda mo: child_blocks.get(mo.group(1), mo.group(2)), parent_src)
+    return _resolve_inheritance(merged, env)      # parent may extend too
+
+
 class Template:
     def __init__(self, source, env=None, name="<string>"):
         self.name = name
         self.env = env
+        if env is not None and (_EXTENDS.match(source) or _BLOCK.search(source)):
+            source = _resolve_inheritance(source, env)
         self._code = self._compile(source)
 
     def _compile(self, source):
@@ -47,12 +90,20 @@ class Template:
             if tok.startswith("{#"):
                 continue
             if tok.startswith("{{"):
-                expr = tok[2:-2].strip()
-                if expr.endswith("| safe") or expr.endswith("|safe"):
-                    expr = expr.rsplit("|", 1)[0].strip()
-                    emit("_out.append(str(%s))" % expr)
-                else:
-                    emit("_out.append(_esc(%s))" % expr)
+                parts = [p.strip() for p in tok[2:-2].split("|")]
+                expr, filters = parts[0], parts[1:]
+                safe = "safe" in filters
+                code = expr
+                for flt in filters:
+                    if flt == "safe":
+                        continue
+                    if "(" in flt:
+                        fname, args = flt.split("(", 1)
+                        code = "_flt[%r](%s, %s)" % (fname.strip(), code, args.rstrip(")"))
+                    else:
+                        code = "_flt[%r](%s)" % (flt, code)
+                emit("_out.append(str(%s))" % code if safe
+                     else "_out.append(_esc(%s))" % code)
             elif tok.startswith("{%"):
                 stmt = tok[2:-2].strip()
                 kw = stmt.split(" ", 1)[0]
@@ -85,6 +136,7 @@ class Template:
         ns["_out"] = []
         ns["_esc"] = escape
         ns["_env"] = self.env
+        ns["_flt"] = FILTERS
         ns["_ctx"] = ctx
         exec(self._code, ns)
         return "".join(ns["_out"])
@@ -110,6 +162,10 @@ class Environment:
             tpl = Template(f.read(), env=self, name=name)
         self._cache[name] = tpl
         return tpl
+
+    def get_source(self, name):
+        with open(os.path.join(self.directory, name), "r", encoding="utf-8") as f:
+            return f.read()
 
     def render(self, name, **ctx):
         merged = dict(self.globals)

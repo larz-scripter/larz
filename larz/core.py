@@ -372,6 +372,12 @@ class Larz:
             if out is not None:
                 return self._coerce(out)
 
+        # per-route guards (auth, API keys, validation, …) attached by decorators
+        for guard in getattr(handler, "_larz_guards", ()):
+            out = guard(req)
+            if out is not None:
+                return self._coerce(out)
+
         # --- money-native enforcement ------------------------------------- #
         paid = getattr(handler, "_larz_paid", None)
         if paid and self.money:
