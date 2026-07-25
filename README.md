@@ -93,11 +93,12 @@ on the SaaS demo to see the revenue dashboard.
 ## Test
 
 ```bash
-python3 tests/test_core.py       # 15 checks
-python3 tests/test_features.py   # 32 checks — money, templating, models, security
+python3 tests/test_core.py       # 15 — routing, sessions, paywall, metering
+python3 tests/test_features.py   # 43 — money, providers, templating, security
+python3 tests/test_v1.py         # 52 — ORM, auth, API, admin, ops, billing
 ```
 
-47 checks, no pytest required.
+110 checks, no pytest required.
 
 ## Scaffold a new app
 
