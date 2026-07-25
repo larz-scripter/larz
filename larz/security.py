@@ -35,21 +35,24 @@ class RateLimiter:
             return req.subject or req.remote_addr
         return req.remote_addr or "?"
 
+    def __call__(self, req):
+        """A before-hook: usable directly with app.use(RateLimiter(...))."""
+        now = time.time()
+        key = self._key(req)
+        dq = self._hits[key]
+        while dq and dq[0] <= now - self.window:
+            dq.popleft()
+        if len(dq) >= self.limit:
+            retry = int(self.window - (now - dq[0])) + 1
+            return Response(
+                {"error": "rate_limited", "retry_after": retry},
+                status=429, headers={"Retry-After": str(retry)})
+        dq.append(now)
+        return None
+
     def hook(self):
-        def before(req):
-            now = time.time()
-            key = self._key(req)
-            dq = self._hits[key]
-            while dq and dq[0] <= now - self.window:
-                dq.popleft()
-            if len(dq) >= self.limit:
-                retry = int(self.window - (now - dq[0])) + 1
-                return Response(
-                    {"error": "rate_limited", "retry_after": retry},
-                    status=429, headers={"Retry-After": str(retry)})
-            dq.append(now)
-            return None
-        return before
+        """Backwards-compatible: returns the before-hook (same as passing self)."""
+        return self.__call__
 
 
 # --------------------------------------------------------------------------- #

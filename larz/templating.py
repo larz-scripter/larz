@@ -138,6 +138,12 @@ class Template:
         ns["_env"] = self.env
         ns["_flt"] = FILTERS
         ns["_ctx"] = ctx
+        # undefined template variables render as empty (like Jinja), rather than
+        # raising NameError — but leave builtins (str, len, …) alone.
+        import builtins
+        for name in self._code.co_names:
+            if name not in ns and not hasattr(builtins, name):
+                ns[name] = ""
         exec(self._code, ns)
         return "".join(ns["_out"])
 

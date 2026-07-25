@@ -129,7 +129,7 @@ def test_auth():
     # api-key metering: billed to the key, not the session
     import larz.money as _money
     from larz.auth import ApiKey, _hash_key
-    _money.enable(app, base_url="http://x")
+    _money.enable(app, base_url="http://x", db=os.path.join(tempfile.mkdtemp(), "ak.db"))
     @app.api_key_required
     @app.metered("$0.02/call")
     @app.post("/api/meter")

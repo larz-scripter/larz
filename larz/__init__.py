@@ -32,7 +32,7 @@ from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
                auth, api, ops, admin)
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __all__ = ["Larz", "Request", "Response", "Blueprint",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
