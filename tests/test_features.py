@@ -28,7 +28,8 @@ class Client:
                "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body),
                "REMOTE_ADDR": "10.0.0.1", "HTTP_USER_AGENT": "test-agent"}
         for k, v in (headers or {}).items():
-            env["HTTP_" + k.upper().replace("-", "_")] = v
+            ek = k.upper().replace("-", "_")
+            env[ek if ek in ("CONTENT_TYPE", "CONTENT_LENGTH") else "HTTP_" + ek] = v
         if self.cookie: env["HTTP_COOKIE"] = self.cookie
         sh = {}
         def sr(status, hs): sh["c"] = int(status.split()[0]); sh["h"] = hs
@@ -169,6 +170,20 @@ def test_rate_limit():
     check("rate limit allows 3 then 429", codes == [200, 200, 200, 429, 429])
 
 
+def test_form_and_content_type_header():
+    # regression: CONTENT_TYPE/CONTENT_LENGTH are CGI vars without HTTP_ prefix
+    app = Larz(secret="t")
+    @app.post("/f")
+    def f(req):
+        return Response.json({"x": req.form.get("x"), "ct": req.header("Content-Type")})
+    c = Client(app)
+    code, body = c.request("POST", "/f", body=b"x=hello",
+                           headers={"Content-Type": "application/x-www-form-urlencoded"})
+    d = json.loads(body)
+    check("req.form parses urlencoded body", d["x"] == "hello")
+    check("req.header reads CONTENT_TYPE cgi var", "urlencoded" in (d["ct"] or ""))
+
+
 def test_bot_filter():
     app = Larz(secret="t")
     app.use(security.bot_filter())
@@ -243,5 +258,6 @@ if __name__ == "__main__":
     test_bot_filter()
     test_gemvault_provider()
     test_require_dynamic(db("require"))
+    test_form_and_content_type_header()
     print("\n  %d passed, %d failed" % (PASS[0], FAIL[0]))
     sys.exit(1 if FAIL[0] else 0)

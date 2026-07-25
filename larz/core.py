@@ -48,8 +48,11 @@ class Request:
         self.user_agent = environ.get("HTTP_USER_AGENT", "")
 
     def header(self, name, default=None):
-        key = "HTTP_" + name.upper().replace("-", "_")
-        return self.environ.get(key, default)
+        # CONTENT_TYPE / CONTENT_LENGTH are CGI vars WITHOUT the HTTP_ prefix.
+        key = name.upper().replace("-", "_")
+        if key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+            return self.environ.get(key, default)
+        return self.environ.get("HTTP_" + key, default)
 
     @property
     def cookies(self):
