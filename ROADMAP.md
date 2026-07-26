@@ -161,3 +161,11 @@ Ecosystem work to make Larz easy to start with. 60 new tests (334 total).
 - **Implicit free tier** — unentitled users now fall back to the cheapest `$0`
   plan, so free-tier limits (`app.within_limit`) work without an explicit
   subscription.
+
+---
+
+# ✅ v2.2 — mount under a subpath
+
+- **`Larz(root_path="/app")`** — host an app under a subpath: redirect Locations and
+  in-page `href`/`action`/`src` links are prefixed automatically, so a Larz app can
+  live at e.g. `example.com/app/` behind a reverse proxy. `app.url(path)` helper.

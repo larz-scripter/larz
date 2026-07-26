@@ -69,8 +69,45 @@ def test_examples_import():
         ck("example compiles: %s" % fn, ok)
 
 
+def test_root_path():
+    """Mount under a subpath: redirects + in-page links get the prefix."""
+    from larz import Larz, Response
+    from larz.testing import Client
+    app = Larz(secret="x", root_path="/larz/demo")
+
+    @app.get("/")
+    def home(req):
+        return ('<a href="/pricing">p</a> <a href="//cdn/x">c</a> '
+                '<a href="http://a/b">a</a> <form action="/submit">'
+                '<img src="/logo.png"></form>')
+
+    @app.get("/go")
+    def go(req):
+        return Response.redirect("/dashboard")
+
+    @app.get("/pricing")
+    def pricing(req):
+        return "priced"
+
+    c = Client(app)
+    h = c.get("/").text
+    ck("root_path prefixes href", 'href="/larz/demo/pricing"' in h)
+    ck("root_path prefixes action", 'action="/larz/demo/submit"' in h)
+    ck("root_path prefixes src", 'src="/larz/demo/logo.png"' in h)
+    ck("root_path leaves protocol-relative", 'href="//cdn/x"' in h)
+    ck("root_path leaves absolute", 'href="http://a/b"' in h)
+    ck("root_path prefixes redirect", c.get("/go").redirect == "/larz/demo/dashboard")
+    ck("root_path route matches at root", c.get("/pricing").text == "priced")
+    ck("app.url helper", app.url("/x") == "/larz/demo/x" and app.url("http://y") == "http://y")
+    # no root_path -> unchanged
+    a2 = Larz(secret="x")
+    @a2.get("/")
+    def h2(req): return '<a href="/x">y</a>'
+    ck("no root_path leaves links", 'href="/x"' in Client(a2).get("/").text)
+
+
 def main():
-    for t in [test_scaffolder, test_examples_import]:
+    for t in [test_scaffolder, test_examples_import, test_root_path]:
         print("\n# " + t.__name__)
         t()
     print("\n%d passed, %d failed" % (P[0], F[0]))
