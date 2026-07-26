@@ -1,6 +1,8 @@
 # ⚡ Larz
 
 
+> **New in 2.0 — Async + Postgres** — an ASGI/async core with WebSockets (and a built-in zero-dependency async server, no uvicorn needed) plus a pure-Python PostgreSQL driver with SCRAM-SHA-256 auth. Still zero dependencies; sqlite stays the default.
+
 > **New in 1.3 — Modern API** — typed request binding & validation from function signatures, dataclass bodies, dependency injection (`Depends`), Server-Sent Events, CORS and lifecycle hooks. FastAPI-style ergonomics, still zero dependencies.
 
 > **New in 1.2 — the Revenue Engine** — pricing-as-code, revenue analytics (MRR/ARR/churn/LTV), dunning & recovery, referrals/affiliates, and **AI monetization** (token metering with BYOK). Larz is now revenue-native *and* AI-native. See the [changelog](https://larzos.com/larz/changelog/).

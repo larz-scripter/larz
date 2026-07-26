@@ -118,5 +118,29 @@ The parity release — the modern-API ergonomics people expect, still zero-dep.
 any Larz/vendor server, no telemetry. Proven with a full app running offline with
 the network hard-blocked.
 
-Next: **v2.0 "Async"** — an ASGI core (async `def` endpoints, async DB, full
-WebSockets) alongside the WSGI one. Also open: a Postgres ORM adapter.
+---
+
+# ✅ v2.0 "Async + Postgres" — SHIPPED
+
+The last two big items, both done — still zero-dependency. 21 new tests (274 total).
+
+- **ASGI / async core** — the Larz app is now dual-protocol: it runs under WSGI
+  (gunicorn) *and* ASGI (uvicorn/hypercorn), detected by call shape. Handlers can
+  be `async def` (awaited) or sync (run directly). ASGI lifespan drives
+  `on_startup`/`on_shutdown`.
+- **WebSockets** — `@app.websocket("/ws/<room>")` async handlers with a
+  `WebSocket` object (`accept`/`receive`/`send`/`send_json`/`close`, `async for`).
+- **A built-in zero-dependency async server** (`larz/aserver.py`) — `app.run_async()`
+  speaks HTTP/1.1 **and** RFC 6455 WebSockets over pure `asyncio`, so async mode
+  needs no uvicorn install. (Production can still use any ASGI server.)
+- **Streaming over ASGI** — `Response.stream()` / `Response.sse()` work under both
+  protocols.
+- **Pure-Python PostgreSQL driver** (`larz/pg.py`) — implements the v3 wire
+  protocol with **SCRAM-SHA-256** (RFC 7677, matches the spec's test vector), md5
+  and cleartext auth, and parameterized (injection-safe) queries. `connect(
+  "postgres://…")` transparently switches the ORM to Postgres; **sqlite stays the
+  zero-config default**. Verified end-to-end against a live PostgreSQL 15 server.
+
+**Larz is feature-complete against its roadmap** — money-native, AI-native,
+FastAPI-style ergonomics, async + WebSockets, sqlite *and* Postgres — all with
+**zero runtime dependencies** and nothing that phones home.

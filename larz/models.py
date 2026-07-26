@@ -30,12 +30,27 @@ _SHARED = {"conn": None}
 
 
 def connect(path):
+    """Point the ORM at a database. `path` is a sqlite file, ':memory:', or a
+    'postgres://user:pass@host:port/db' URL (pure-Python driver, see larz.pg)."""
     _DB_PATH["path"] = path
     _SHARED["conn"] = None
+    _STATE.conn = None
+
+
+def _is_pg(path):
+    return isinstance(path, str) and path.startswith(("postgres://", "postgresql://"))
 
 
 def _conn():
-    if _DB_PATH["path"] == ":memory:":
+    path = _DB_PATH["path"]
+    if _is_pg(path):
+        from .pg import PgAdapter, connect as _pgconnect
+        c = getattr(_STATE, "conn", None)
+        if not isinstance(c, PgAdapter):
+            c = PgAdapter(_pgconnect(path))
+            _STATE.conn = c
+        return c
+    if path == ":memory:":
         if _SHARED["conn"] is None:
             c = sqlite3.connect(":memory:", check_same_thread=False)
             c.row_factory = sqlite3.Row
@@ -43,8 +58,8 @@ def _conn():
             _SHARED["conn"] = c
         return _SHARED["conn"]
     c = getattr(_STATE, "conn", None)
-    if c is None:
-        c = sqlite3.connect(_DB_PATH["path"])
+    if c is None or not hasattr(c, "row_factory"):
+        c = sqlite3.connect(path)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys=ON")
         _STATE.conn = c

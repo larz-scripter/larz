@@ -27,19 +27,19 @@ models. See examples/ for runnable demos.
 """
 
 from .core import (Larz, Request, Response, Blueprint, UploadedFile,
-                   get_flashed_messages)
+                   get_flashed_messages, WebSocket)
 from .templating import Template, Environment
 from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
                auth, api, ops, admin, twofa, oauth, storage, testing,
-               pricing, analytics, referrals, ai, crypto, params)
+               pricing, analytics, referrals, ai, crypto, params, pg, aserver)
 from .params import Depends, Query, Path, Body, Form
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 __all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
-           "get_flashed_messages", "Depends", "Query", "Path", "Body", "Form",
+           "get_flashed_messages", "WebSocket", "Depends", "Query", "Path", "Body", "Form",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
            "auth", "api", "ops", "admin", "twofa", "oauth", "storage",
            "testing", "pricing", "analytics", "referrals", "ai", "crypto",
-           "params", "__version__"]
+           "params", "pg", "aserver", "__version__"]

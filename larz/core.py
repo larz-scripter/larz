@@ -26,7 +26,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 __all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
-           "get_flashed_messages"]
+           "get_flashed_messages", "WebSocket"]
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +280,93 @@ def _status_line(code):
 
 
 # --------------------------------------------------------------------------- #
+#  ASGI helpers
+# --------------------------------------------------------------------------- #
+def _scope_to_environ(scope, body):
+    """Build a WSGI-style environ from an ASGI http scope + body, so the existing
+    Request/Response machinery works unchanged under async."""
+    import io as _io
+    environ = {
+        "REQUEST_METHOD": scope.get("method", "GET"),
+        "PATH_INFO": scope.get("path", "/"),
+        "QUERY_STRING": (scope.get("query_string", b"") or b"").decode("latin-1"),
+        "SERVER_PROTOCOL": "HTTP/1.1",
+        "wsgi.input": _io.BytesIO(body),
+        "wsgi.url_scheme": scope.get("scheme", "http"),
+        "CONTENT_LENGTH": str(len(body)),
+        "REMOTE_ADDR": (scope.get("client") or ["", 0])[0] or "",
+    }
+    for name, value in scope.get("headers", []):
+        key = name.decode("latin-1").upper().replace("-", "_")
+        val = value.decode("latin-1")
+        if key in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+            environ[key] = val
+        else:
+            environ["HTTP_" + key] = val
+    return environ
+
+
+class WebSocket:
+    """A minimal ASGI WebSocket. Handlers registered with @app.websocket receive
+    one of these:
+
+        @app.websocket("/ws/<room>")
+        async def chat(ws):
+            await ws.accept()
+            async for msg in ws:
+                await ws.send("echo: " + msg)
+    """
+    def __init__(self, scope, receive, send, params=None):
+        self.scope = scope
+        self._receive = receive
+        self._send = send
+        self.params = params or {}
+        self.accepted = False
+        self.closed = False
+
+    async def accept(self, subprotocol=None):
+        msg = await self._receive()          # websocket.connect
+        if msg.get("type") != "websocket.connect":
+            pass
+        await self._send({"type": "websocket.accept", "subprotocol": subprotocol})
+        self.accepted = True
+
+    async def receive(self):
+        """Return the next text (str) or bytes message, or None if disconnected."""
+        msg = await self._receive()
+        if msg["type"] == "websocket.disconnect":
+            self.closed = True
+            return None
+        return msg.get("text") if msg.get("text") is not None else msg.get("bytes")
+
+    async def send(self, data):
+        if isinstance(data, (bytes, bytearray)):
+            await self._send({"type": "websocket.send", "bytes": bytes(data)})
+        else:
+            await self._send({"type": "websocket.send", "text": str(data)})
+
+    async def send_json(self, obj):
+        await self.send(json.dumps(obj))
+
+    async def close(self, code=1000):
+        if not self.closed:
+            self.closed = True
+            try:
+                await self._send({"type": "websocket.close", "code": code})
+            except Exception:
+                pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        msg = await self.receive()
+        if msg is None:
+            raise StopAsyncIteration
+        return msg
+
+
+# --------------------------------------------------------------------------- #
 #  Routing
 # --------------------------------------------------------------------------- #
 _CONVERTERS = {"int": (r"[0-9]+", int), "str": (r"[^/]+", str),
@@ -381,6 +468,7 @@ class Larz:
         self._on_startup = []
         self._on_shutdown = []
         self._started = False
+        self._ws_routes = []      # (regex, converters, async handler)
         self.money = None     # attached by larz.money.enable(app, ...)
         self.seo = None       # attached by larz.seo.enable(app, ...)
         self.templates = None
@@ -452,6 +540,18 @@ class Larz:
 
     def post(self, pattern, **opts):
         return self.route(pattern, ("POST",), **opts)
+
+    def websocket(self, pattern):
+        """Register an async WebSocket handler (ASGI only):
+
+            @app.websocket("/ws/<room>")
+            async def handler(ws): ...
+        """
+        regex, conv = _compile(pattern)
+        def deco(fn):
+            self._ws_routes.append((regex, conv, fn))
+            return fn
+        return deco
 
     def before(self, fn):
         self._before.append(fn); return fn
@@ -558,9 +658,11 @@ class Larz:
             return r, params
         return (None, "405") if allowed else (None, None)
 
-    def dispatch(self, req):
+    def _resolve(self, req):
+        """Run the request pipeline up to (not including) the handler call.
+        Returns a Response to short-circuit, or (handler, kwargs) to invoke.
+        Shared by the sync (WSGI) and async (ASGI) dispatchers."""
         # global before-hooks (middleware) run first — they can short-circuit
-        # (CORS preflight, auth, rate limiting) even for unmatched routes.
         for hook in self._before:
             out = hook(req)
             if out is not None:
@@ -568,44 +670,63 @@ class Larz:
 
         route, params = self._match(req)
         if route is None:
-            code = 405 if params == "405" else 404
-            return self._error(code, req)
+            return self._error(405 if params == "405" else 404, req)
         req.params = params
         handler = route.handler
 
-        # per-route guards (auth, API keys, validation, …) attached by decorators
         for guard in getattr(handler, "_larz_guards", ()):
             out = guard(req)
             if out is not None:
                 return self._coerce(out)
 
         # --- money-native enforcement ------------------------------------- #
-        paid = getattr(handler, "_larz_paid", None)
-        if paid and self.money:
-            gate = self.money.enforce_paid(req, paid, route)
-            if gate is not None:
-                return self._coerce(gate)
+        if self.money:
+            paid = getattr(handler, "_larz_paid", None)
+            if paid:
+                gate = self.money.enforce_paid(req, paid, route)
+                if gate is not None:
+                    return self._coerce(gate)
+            metered = getattr(handler, "_larz_metered", None)
+            if metered:
+                gate = self.money.enforce_metered(req, metered, route)
+                if gate is not None:
+                    return self._coerce(gate)
+            plan = getattr(handler, "_larz_plan", None)
+            if plan:
+                gate = self.money.enforce_plan(req, plan, route)
+                if gate is not None:
+                    return self._coerce(gate)
 
-        metered = getattr(handler, "_larz_metered", None)
-        if metered and self.money:
-            gate = self.money.enforce_metered(req, metered, route)
-            if gate is not None:
-                return self._coerce(gate)
+        from .params import needs_binding, bind
+        kwargs = {}
+        if needs_binding(handler):
+            kwargs, err = bind(handler, req)
+            if err is not None:
+                return err
+        return (handler, kwargs)
 
-        plan = getattr(handler, "_larz_plan", None)
-        if plan and self.money:
-            gate = self.money.enforce_plan(req, plan, route)
-            if gate is not None:
-                return self._coerce(gate)
-
+    def dispatch(self, req):
+        r = self._resolve(req)
+        if isinstance(r, Response):
+            return r
+        handler, kwargs = r
         try:
-            from .params import needs_binding, bind
-            if needs_binding(handler):
-                kwargs, err = bind(handler, req)
-                if err is not None:
-                    return err
-                return self._coerce(handler(req, **kwargs))
-            return self._coerce(handler(req))
+            return self._coerce(handler(req, **kwargs))
+        except Exception as exc:  # noqa
+            _traceback.print_exc()
+            return self._error(500, req, exc)
+
+    async def adispatch(self, req):
+        """Async dispatch — awaits `async def` handlers, runs sync ones directly."""
+        r = self._resolve(req)
+        if isinstance(r, Response):
+            return r
+        handler, kwargs = r
+        try:
+            out = handler(req, **kwargs)
+            if inspect.isawaitable(out):
+                out = await out
+            return self._coerce(out)
         except Exception as exc:  # noqa
             _traceback.print_exc()
             return self._error(500, req, exc)
@@ -633,39 +754,115 @@ class Larz:
                 500: "Internal Server Error"}
         return Response("%d %s" % (code, msgs.get(code, "Error")), status=code)
 
-    # -- WSGI --------------------------------------------------------------- #
-    def __call__(self, environ, start_response):
-        if not self._started:
-            self.startup()          # lazy startup (works under gunicorn too)
-        req = Request(environ)
+    # -- shared request lifecycle ------------------------------------------ #
+    def _prepare(self, req):
         req.session = self.sessions.load(req)
         had_cookie = self.sessions.cookie in req.cookies
         if "sid" not in req.session:
             req.session["sid"] = uuid.uuid4().hex
-        original_session = dict(req.session)
+        return had_cookie, dict(req.session)
 
-        resp = self.dispatch(req)
-
+    def _finalize(self, req, resp, had_cookie, original_session):
         for hook in self._after:
             hook(req, resp)
-
-        # persist the session if it changed OR the visitor had no cookie yet
-        # (a first-time visitor's freshly-minted sid must be sent back, or the
-        #  subject would change on every request and entitlements wouldn't stick)
         if not had_cookie or req.session != original_session:
             resp.set_cookie(self.sessions.cookie, self.sessions.dump(req.session))
-
-        headers = []
-        set_cookies = resp.headers.pop("_set_cookie", [])
-        for k, v in resp.headers.items():
-            headers.append((k, v))
-        for c in set_cookies:
+        headers = [(k, v) for k, v in resp.headers.items() if k != "_set_cookie"]
+        for c in resp.headers.get("_set_cookie", []):
             headers.append(("Set-Cookie", c))
+        return headers
 
+    # -- protocol entry point (WSGI or ASGI, detected by call shape) -------- #
+    def __call__(self, *args):
+        if (len(args) == 3 and isinstance(args[0], dict)
+                and args[0].get("type") in ("http", "websocket", "lifespan")):
+            return self._asgi(*args)          # returns a coroutine (awaited by server)
+        return self._wsgi(*args)
+
+    # -- WSGI --------------------------------------------------------------- #
+    def _wsgi(self, environ, start_response):
+        if not self._started:
+            self.startup()          # lazy startup (works under gunicorn too)
+        req = Request(environ)
+        had_cookie, original = self._prepare(req)
+        resp = self.dispatch(req)
+        headers = self._finalize(req, resp, had_cookie, original)
         start_response(_status_line(resp.status), headers)
         if resp._stream is not None:
             return resp._stream
         return [resp.body]
+
+    # -- ASGI (async core; runs on uvicorn/hypercorn) ----------------------- #
+    async def _asgi(self, scope, receive, send):
+        t = scope["type"]
+        if t == "lifespan":
+            return await self._asgi_lifespan(scope, receive, send)
+        if t == "websocket":
+            return await self._asgi_websocket(scope, receive, send)
+        return await self._asgi_http(scope, receive, send)
+
+    async def _asgi_lifespan(self, scope, receive, send):
+        while True:
+            msg = await receive()
+            if msg["type"] == "lifespan.startup":
+                try:
+                    self.startup()
+                    await send({"type": "lifespan.startup.complete"})
+                except Exception as e:  # noqa
+                    await send({"type": "lifespan.startup.failed", "message": str(e)})
+            elif msg["type"] == "lifespan.shutdown":
+                self.shutdown()
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+    async def _asgi_http(self, scope, receive, send):
+        if not self._started:
+            self.startup()
+        body = b""
+        more = True
+        while more:
+            msg = await receive()
+            body += msg.get("body", b"") or b""
+            more = msg.get("more_body", False)
+        environ = _scope_to_environ(scope, body)
+        req = Request(environ)
+        had_cookie, original = self._prepare(req)
+        resp = await self.adispatch(req)
+        headers = self._finalize(req, resp, had_cookie, original)
+        raw_headers = [(k.encode("latin-1"), str(v).encode("latin-1")) for k, v in headers]
+        await send({"type": "http.response.start", "status": resp.status,
+                    "headers": raw_headers})
+        if resp._stream is not None:
+            stream = resp._stream
+            if hasattr(stream, "__aiter__"):
+                async for chunk in stream:
+                    await send({"type": "http.response.body",
+                                "body": chunk if isinstance(chunk, bytes) else str(chunk).encode(),
+                                "more_body": True})
+            else:
+                for chunk in stream:
+                    await send({"type": "http.response.body",
+                                "body": chunk if isinstance(chunk, bytes) else str(chunk).encode(),
+                                "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        else:
+            await send({"type": "http.response.body", "body": resp.body})
+
+    async def _asgi_websocket(self, scope, receive, send):
+        path = scope.get("path", "/")
+        for regex, conv, handler in self._ws_routes:
+            m = regex.match(path)
+            if m:
+                params = {k: conv.get(k, str)(v) for k, v in m.groupdict().items()}
+                ws = WebSocket(scope, receive, send, params)
+                try:
+                    await handler(ws)
+                except Exception:  # noqa
+                    _traceback.print_exc()
+                    await ws.close(1011)
+                return
+        # no matching route: reject the handshake
+        await send({"type": "websocket.close", "code": 1000})
 
     # -- dev server --------------------------------------------------------- #
     def run(self, host="127.0.0.1", port=8000):
@@ -675,10 +872,19 @@ class Larz:
         print("  Larz  money-native  ->  http://%s:%d  (%d routes)"
               % (host, port, len(self.routes)))
         self.startup()
-        srv = make_server(host, port, self)
+        srv = make_server(host, port, self)  # noqa
         try:
             srv.serve_forever()
         except KeyboardInterrupt:
             print("\n  bye.")
         finally:
             self.shutdown()
+
+    def run_async(self, host="127.0.0.1", port=8000):
+        """Run in async mode with the built-in zero-dependency ASGI server
+        (HTTP + WebSockets). For production, use uvicorn/hypercorn — the app is a
+        standard ASGI callable: `uvicorn module:app`."""
+        if self.seo:
+            self.seo.install_routes()
+        from .aserver import serve
+        serve(self, host, port)
