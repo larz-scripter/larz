@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "larz"
-version = "2.2.1"
+version = "2.3.0"
 description = "The money-native web framework — payments, paywalls and metering as first-class primitives. Zero dependencies."
 readme = "README.md"
 requires-python = ">=3.7"
@@ -18,6 +18,22 @@ classifiers = [
   "Topic :: Office/Business :: Financial",
 ]
 dependencies = []            # zero runtime dependencies, by design
+
+# Optional extras light up larz.contrib adapters with Larz Stack libraries.
+# The core stays zero-dependency; you opt into exactly what you need.
+[project.optional-dependencies]
+money = ["larzmoney", "larzledger", "larzpdf"]
+auth = ["larzcrypt", "larztotp", "larzqr", "larzsession"]
+ai = ["larzagent"]
+data = ["larzdb", "larzsql", "larzcache", "larzmigrate"]
+ops = ["larztask", "larzcron", "larzlimit", "larzretry", "larzlog", "larzmetrics"]
+full = [
+  "larzmoney", "larzledger", "larzpdf",
+  "larzcrypt", "larztotp", "larzqr", "larzsession",
+  "larzagent",
+  "larzdb", "larzsql", "larzcache", "larzmigrate",
+  "larztask", "larzcron", "larzlimit", "larzretry", "larzlog", "larzmetrics",
+]
 
 [project.scripts]
 larz = "larz.cli:main"

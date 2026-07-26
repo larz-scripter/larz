@@ -65,7 +65,33 @@ never write `if user.is_paid`.
 | **Ops** | `larz.ops` — `@app.cache` · **background jobs** (`@app.job`) · **cron scheduler** (`@app.schedule`) · email (SMTP) · `.env` config · `/healthz` + `/metrics` |
 | **Templating** | `{{ }}` / `{% for %}` / `{% if %}` · **inheritance** (`{% extends %}`/`{% block %}`) · **filters** (`|upper`, `|currency`, `|date`…) · autoescaping |
 | **Core** | WSGI engine · typed routing · signed-cookie sessions · blueprints · static files · debug pages |
-| **Security · SEO · CLI** | Rate limiting, bot filter, CSRF, CORS · auto sitemap/robots + OpenGraph + IndexNow · `larz new / run / routes` |
+| **Security · SEO · CLI** | Rate limiting, bot filter, CSRF, CORS · auto sitemap/robots + OpenGraph + IndexNow + **internal-linking engine** (`ContentGraph`, `interlink`, JSON-LD) · `larz new / run / routes` |
+
+## The Larz Stack — opt-in power, still zero-dependency
+
+The core installs with **zero dependencies**, and always will. When you want more,
+opt into the [Larz Stack](https://larzos.com/stack/) — 60+ pure-Python,
+zero-dependency libraries — and `larz.contrib` lights up:
+
+```bash
+pip install larz            # zero-dependency core
+pip install larz[money]     # + larzmoney, larzledger, larzpdf
+pip install larz[auth]      # + larzcrypt, larztotp, larzqr, larzsession
+pip install larz[full]      # the whole stack
+```
+
+```python
+from larz.contrib import pdf, ledger, twofa_qr
+pdf.enable(app); ledger.enable(app); twofa_qr.enable(app, issuer="Acme")
+
+app.invoice("INV-1", items=[("Pro plan", 1, "99.00")], tax=0.08)  # real PDF (larzpdf)
+app.record_sale("Pro plan", "99.00")                              # double-entry books (larzledger)
+secret, svg = app.twofa_enroll(user.email)                        # scannable 2FA QR (larztotp+larzqr)
+```
+
+Adapters import their backing library lazily, so opting in is never forced —
+minimalists keep the clean install; power users get the batteries. See
+`examples/full_stack_saas.py`.
 
 ## Why
 

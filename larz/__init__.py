@@ -32,14 +32,15 @@ from .templating import Template, Environment
 from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
                auth, api, ops, admin, twofa, oauth, storage, testing,
-               pricing, analytics, referrals, ai, crypto, params, pg, aserver)
+               pricing, analytics, referrals, ai, crypto, params, pg, aserver,
+               contrib)
 from .params import Depends, Query, Path, Body, Form
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 __all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
            "get_flashed_messages", "WebSocket", "Depends", "Query", "Path", "Body", "Form",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
            "auth", "api", "ops", "admin", "twofa", "oauth", "storage",
            "testing", "pricing", "analytics", "referrals", "ai", "crypto",
-           "params", "pg", "aserver", "__version__"]
+           "params", "pg", "aserver", "contrib", "__version__"]
