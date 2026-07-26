@@ -10,7 +10,7 @@ That's the whole contract. Ships with:
 
     MockProvider    keyless, fully local — the dev/test default.
     StripeProvider  real Stripe Checkout via stdlib urllib (no `stripe` SDK).
-    GemVaultProvider / DodoProvider   estate rails (hosted checkout + webhook).
+    GemVaultProvider / DodoProvider   hosted checkout + webhook (your own hub).
     CryptoProvider  address-based crypto, confirmed by webhook.
 
 None of these pull a third-party dependency: everything goes over urllib.
@@ -131,17 +131,19 @@ class StripeProvider(PaymentProvider):
 
 # --------------------------------------------------------------------------- #
 class GemVaultProvider(PaymentProvider):
-    """Estate rail: GemVault multi-merchant hub (card via Dodo + crypto).
+    """Adapter for a self-hosted multi-merchant checkout hub (card + crypto), of
+    the "GemVault" shape. You point it at YOUR OWN hub instance — it never talks
+    to anyone else's server. Useful if you run a shared payment gateway across
+    several of your own apps.
 
-    Verified against the estate's live GemVault `mkt.py`:
-      * create : POST {api}/api/mkt/dodo/checkout  (token-authed, server-to-server)
+      * create : POST {api_base}/api/mkt/dodo/checkout  (token-authed, server-to-server)
                  body {app, uid, amount, return_url} -> {checkout_url}
-                 (`app` must be in GemVault's DODO_ALLOWED_APPS allowlist)
       * webhook: X-GV-Signature = HMAC-SHA256(raw_body, secret) hex,
                  body carries {uid, usd_amount, tx_hash|session_id}
 
-    GemVault only round-trips `uid`, so Larz packs `subject|sku` into it and
-    unpacks on the way back — giving the framework its (subject, sku) grant."""
+    The hub only round-trips `uid`, so Larz packs `subject|sku` into it and
+    unpacks on the way back — giving the framework its (subject, sku) grant.
+    Requires api_base + token + secret you provide; inert without them."""
     name = "gemvault"
 
     def __init__(self, app, api_base, token, secret):
@@ -183,7 +185,7 @@ class GemVaultProvider(PaymentProvider):
 
 # --------------------------------------------------------------------------- #
 class DodoProvider(PaymentProvider):
-    """Estate rail: Dodo Payments card provider (X-GV-Signature-style webhook)."""
+    """Dodo Payments card provider (dodopayments.com) — your own Dodo account."""
     name = "dodo"
 
     def __init__(self, api_key, webhook_secret, api_base="https://api.dodopayments.com"):

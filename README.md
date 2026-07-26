@@ -1,6 +1,8 @@
 # ⚡ Larz
 
 
+> **New in 1.3 — Modern API** — typed request binding & validation from function signatures, dataclass bodies, dependency injection (`Depends`), Server-Sent Events, CORS and lifecycle hooks. FastAPI-style ergonomics, still zero dependencies.
+
 > **New in 1.2 — the Revenue Engine** — pricing-as-code, revenue analytics (MRR/ARR/churn/LTV), dunning & recovery, referrals/affiliates, and **AI monetization** (token metering with BYOK). Larz is now revenue-native *and* AI-native. See the [changelog](https://larzos.com/larz/changelog/).
 
 > **New in 1.1** — TOTP 2FA, social login (Google/GitHub), file uploads, a marketplace payout ledger, four more payment providers (Square, Razorpay, Mollie, Coinbase Commerce), and a first-class test client. See the [changelog](https://larzos.com/larz/changelog/).
@@ -117,6 +119,10 @@ cd myapp && python3 -m larz run
 in-memory rate limiting, MockProvider is dev-only). Roadmap: ASGI/async core,
 production server recipe, dunning/renewal reminders, richer analytics, a hosted
 docs site at [larzos.com/larz](https://larzos.com/larz).
+
+## Runs on your infrastructure, not ours
+
+Larz is a library you `pip install` — it has **zero runtime dependencies** and makes **no calls to any Larz/vendor server**. Everything (payments via the keyless mock provider, auth, the ORM, 2FA, uploads, pricing, revenue analytics, AI metering) runs entirely on your machine, offline. The only network calls Larz ever makes are to services **you** configure with **your** keys — Stripe/Paddle/etc. for real payments, Google/GitHub for social login, your LLM provider for AI. Your data and your customers stay in your database, on your server. There is no telemetry and no phone-home.
 
 ## License
 

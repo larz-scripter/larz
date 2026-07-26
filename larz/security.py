@@ -3,7 +3,7 @@ larz.security — production-minded middleware, zero-dep.
 
   * RateLimiter    — per-IP (or per-subject) sliding-window limits.
   * bot_filter     — drop obvious bots / invalid traffic before it hits handlers
-                     (informed by the estate's real invalid-traffic work).
+                     (volume-and-behaviour based, not UA sniffing).
   * csrf           — double-submit-cookie CSRF protection for unsafe methods.
   * cors           — permissive-by-config CORS headers.
 

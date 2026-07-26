@@ -94,5 +94,29 @@ whole money lifecycle. 56 new tests (220 total), zero dependencies.
 - **Authenticated encryption** (`larz/crypto.py`) — `Cipher` for secrets at rest
   (HMAC-SHA256-CTR + encrypt-then-MAC, standard-library only).
 
-Next: **v1.3 "Modern API"** (typed-signature validation, DI, WebSockets/SSE,
-Swagger/ReDoc) → **v2.0 "Async"** (ASGI core).
+---
+
+# ✅ v1.3 "Modern API" — SHIPPED
+
+The parity release — the modern-API ergonomics people expect, still zero-dep.
+33 new tests (253 total).
+
+- **Typed request binding** (`larz/params.py`) — annotate a handler's parameters
+  and Larz validates, coerces and injects them (`name: str, qty: int = 1`); bad
+  input → a 422 with per-field errors. **Dataclass request bodies** validate the
+  whole JSON body. `Query`/`Path`/`Body`/`Form` markers.
+- **Dependency injection** — `Depends(fn)` resolves and caches per request.
+- **Streaming & Server-Sent Events** — `Response.stream(iter)` and
+  `Response.sse(events)` for real-time push and large downloads, over plain WSGI.
+- **Typed OpenAPI + a self-contained API explorer** — `/openapi.json` now reflects
+  the typed signatures; the built-in `/docs` explorer shows params (no CDN).
+- **CORS** — `app.enable_cors()` with preflight handling.
+- **Lifecycle** — `@app.on_startup` / `@app.on_shutdown` (also fire under gunicorn).
+- Middleware now runs before routing, so it can short-circuit any request.
+
+**Runs on your infrastructure, not ours** — zero runtime dependencies, no calls to
+any Larz/vendor server, no telemetry. Proven with a full app running offline with
+the network hard-blocked.
+
+Next: **v2.0 "Async"** — an ASGI core (async `def` endpoints, async DB, full
+WebSockets) alongside the WSGI one. Also open: a Postgres ORM adapter.

@@ -115,14 +115,62 @@ class Webhooks:
 # --------------------------------------------------------------------------- #
 #  OpenAPI generation
 # --------------------------------------------------------------------------- #
+_PYTYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean",
+            "list": "array", "dict": "object"}
+
+
+def _sig_openapi(handler, method, path_names):
+    """Derive OpenAPI parameters + requestBody from a handler's typed signature."""
+    import inspect
+    try:
+        from .params import Depends, _Source, dataclasses
+    except Exception:
+        return [], None
+    try:
+        sigp = list(inspect.signature(handler).parameters.values())[1:]
+    except (TypeError, ValueError):
+        return [], None
+    parameters, body_props, required = [], {}, []
+    for p in sigp:
+        name, ann, default = p.name, p.annotation, p.default
+        if isinstance(default, Depends):
+            continue
+        otype = _PYTYPES.get(getattr(ann, "__name__", ""), "string")
+        if ann is not inspect.Parameter.empty and dataclasses and dataclasses.is_dataclass(ann):
+            for f in dataclasses.fields(ann):
+                body_props[f.name] = {"type": _PYTYPES.get(getattr(f.type, "__name__", ""), "string")}
+                if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:  # noqa
+                    required.append(f.name)
+            continue
+        where = getattr(default, "where", None) if isinstance(default, _Source) else None
+        req_flag = (default is inspect.Parameter.empty)
+        if where == "path" or name in path_names:
+            parameters.append({"name": name, "in": "path", "required": True,
+                               "schema": {"type": otype}})
+        elif where == "query" or method == "GET":
+            parameters.append({"name": name, "in": "query", "required": req_flag,
+                               "schema": {"type": otype}})
+        else:
+            body_props[name] = {"type": otype}
+            if req_flag:
+                required.append(name)
+    body = None
+    if body_props:
+        schema = {"type": "object", "properties": body_props}
+        if required:
+            schema["required"] = required
+        body = {"content": {"application/json": {"schema": schema}}}
+    return parameters, body
+
+
 def _openapi(app, title, version):
+    import re
     paths = {}
     for r in app.routes:
         if r.pattern.startswith("/larz/") or r.pattern in ("/openapi.json", "/docs"):
             continue
-        # convert /u/<id:int> -> /u/{id}
-        import re
-        p = re.sub(r"<([^:>]+)(:[^>]+)?>", r"{\1}", r.pattern)
+        p = re.sub(r"<([^:>]+)(:[^>]+)?>", r"{\1}", r.pattern)   # /u/<id:int> -> /u/{id}
+        path_names = re.findall(r"<([^:>]+)(?::[^>]+)?>", r.pattern)
         h = r.handler
         for m in r.methods:
             if m in ("HEAD", "OPTIONS"):
@@ -134,23 +182,28 @@ def _openapi(app, title, version):
                 tags.append("paid")
             if getattr(h, "_larz_metered", None):
                 tags.append("metered")
-            for g in getattr(h, "_larz_guards", []):
-                pass
             if tags:
                 op["tags"] = tags
+            # 1) typed-signature params (v1.3)
+            params, body = _sig_openapi(h, m, path_names)
+            # 2) legacy dict-schema from @app.validate
             schema = getattr(h, "_larz_schema", None)
             if schema and m in ("POST", "PUT", "PATCH"):
-                props, required = {}, []
+                props, req = {}, []
                 for f, spec in schema.items():
                     if not isinstance(spec, dict):
                         spec = {"type": spec}
                     props[f] = {"type": _TYPES.get(spec.get("type"), "string")}
                     if spec.get("required"):
-                        required.append(f)
-                body = {"type": "object", "properties": props}
-                if required:
-                    body["required"] = required
-                op["requestBody"] = {"content": {"application/json": {"schema": body}}}
+                        req.append(f)
+                sbody = {"type": "object", "properties": props}
+                if req:
+                    sbody["required"] = req
+                body = {"content": {"application/json": {"schema": sbody}}}
+            if params:
+                op["parameters"] = params
+            if body and m in ("POST", "PUT", "PATCH", "DELETE"):
+                op["requestBody"] = body
             paths.setdefault(p, {})[m.lower()] = op
     return {"openapi": "3.0.0", "info": {"title": title, "version": version}, "paths": paths}
 
@@ -170,8 +223,15 @@ fetch('/openapi.json').then(r=>r.json()).then(spec=>{
  for(const [path,methods] of Object.entries(spec.paths)){
   for(const [m,op] of Object.entries(methods)){
    const tags=(op.tags||[]).map(t=>`<span class=tag>${t}</span>`).join('');
+   let det='';
+   (op.parameters||[]).forEach(p=>{det+=`<div style=font-size:13px><code>${p.name}</code> `+
+     `<i style=color:#888>${p.in} · ${(p.schema||{}).type||'string'}${p.required?' · required':''}</i></div>`;});
+   const bp=(((op.requestBody||{}).content||{})['application/json']||{}).schema;
+   if(bp&&bp.properties){det+='<div style=font-size:13px;margin-top:4px;color:#666>body:</div>';
+     for(const [f,s] of Object.entries(bp.properties)){const rq=(bp.required||[]).includes(f);
+       det+=`<div style=font-size:13px;margin-left:10px><code>${f}</code> <i style=color:#888>${s.type}${rq?' · required':''}</i></div>`;}}
    h+=`<div class=op><span class="m ${m}">${m.toUpperCase()}</span> <code>${path}</code>${tags}
-   <div style=color:#555;margin-top:6px>${op.summary||''}</div></div>`;
+   <div style=color:#555;margin:6px 0>${op.summary||''}</div>${det}</div>`;
   }
  }
  document.getElementById('ops').innerHTML=h||'<p>No endpoints.</p>';

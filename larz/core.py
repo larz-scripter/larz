@@ -204,6 +204,7 @@ class Response:
             content_type = "application/json"
         self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
         self.headers.setdefault("Content-Type", content_type)
+        self._stream = None      # set by Response.stream()/sse() for streaming bodies
 
     @classmethod
     def redirect(cls, location, status=302):
@@ -212,6 +213,39 @@ class Response:
     @classmethod
     def json(cls, data, status=200):
         return cls(json.dumps(data), status=status, content_type="application/json")
+
+    @classmethod
+    def stream(cls, iterator, status=200, content_type="application/octet-stream",
+               headers=None):
+        """Stream a response from an iterable of str/bytes chunks (WSGI streaming).
+        Good for large downloads, CSV exports, or progressive output."""
+        r = cls("", status=status, headers=headers, content_type=content_type)
+        def _chunks():
+            for c in iterator:
+                yield c if isinstance(c, bytes) else str(c).encode("utf-8")
+        r._stream = _chunks()
+        return r
+
+    @classmethod
+    def sse(cls, events, headers=None):
+        """Server-Sent Events stream. `events` yields strings (data) or
+        (event_name, data) tuples; Larz frames them as text/event-stream.
+        Works over plain WSGI — real-time push without websockets."""
+        def _frames():
+            for e in events:
+                if isinstance(e, tuple):
+                    name, data = e
+                    yield ("event: %s\n" % name).encode()
+                else:
+                    data = e
+                for line in str(data).split("\n"):
+                    yield ("data: %s\n" % line).encode()
+                yield b"\n"
+        h = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        h.update(headers or {})
+        r = cls("", headers=h, content_type="text/event-stream")
+        r._stream = _frames()
+        return r
 
     def hx_trigger(self, event, detail=None):
         """Fire a client-side HTMX event via the HX-Trigger response header."""
@@ -344,6 +378,9 @@ class Larz:
         self._before = []
         self._after = []
         self._error_handlers = {}
+        self._on_startup = []
+        self._on_shutdown = []
+        self._started = False
         self.money = None     # attached by larz.money.enable(app, ...)
         self.seo = None       # attached by larz.seo.enable(app, ...)
         self.templates = None
@@ -427,6 +464,54 @@ class Larz:
             self._error_handlers[code] = fn; return fn
         return deco
 
+    # -- lifecycle ---------------------------------------------------------- #
+    def on_startup(self, fn):
+        """Run `fn()` once when the app starts serving (or first request)."""
+        self._on_startup.append(fn); return fn
+
+    def on_shutdown(self, fn):
+        self._on_shutdown.append(fn); return fn
+
+    def startup(self):
+        if self._started:
+            return
+        self._started = True
+        for fn in self._on_startup:
+            fn()
+
+    def shutdown(self):
+        for fn in self._on_shutdown:
+            try: fn()
+            except Exception: pass
+
+    def enable_cors(self, origins="*", methods="GET,POST,PUT,PATCH,DELETE,OPTIONS",
+                    headers="Content-Type,Authorization", credentials=False):
+        """Add permissive-by-default CORS headers and answer preflight OPTIONS."""
+        def _cors_before(req):
+            if req.method == "OPTIONS":
+                return Response("", status=204, headers=self._cors_headers(
+                    req, origins, methods, headers, credentials))
+            return None
+        def _cors_after(req, resp):
+            for k, v in self._cors_headers(req, origins, methods, headers, credentials).items():
+                resp.headers.setdefault(k, v)
+        self._before.append(_cors_before)
+        self._after.append(_cors_after)
+        return self
+
+    @staticmethod
+    def _cors_headers(req, origins, methods, headers, credentials):
+        origin = req.header("Origin", "")
+        allow = origin if (origins == "*" and credentials) else origins
+        if isinstance(origins, (list, tuple)):
+            allow = origin if origin in origins else ""
+        h = {"Access-Control-Allow-Origin": allow or "*",
+             "Access-Control-Allow-Methods": methods,
+             "Access-Control-Allow-Headers": headers}
+        if credentials:
+            h["Access-Control-Allow-Credentials"] = "true"
+        return h
+
     # -- money-native decorators (metadata only; enforced in dispatch) ------ #
     def paid(self, price, sku=None, days=None, trial_days=None, plan=None):
         """Gate a route behind a one-off, subscription, or trial payment.
@@ -474,18 +559,19 @@ class Larz:
         return (None, "405") if allowed else (None, None)
 
     def dispatch(self, req):
+        # global before-hooks (middleware) run first — they can short-circuit
+        # (CORS preflight, auth, rate limiting) even for unmatched routes.
+        for hook in self._before:
+            out = hook(req)
+            if out is not None:
+                return self._coerce(out)
+
         route, params = self._match(req)
         if route is None:
             code = 405 if params == "405" else 404
             return self._error(code, req)
         req.params = params
         handler = route.handler
-
-        # before hooks may short-circuit
-        for hook in self._before:
-            out = hook(req)
-            if out is not None:
-                return self._coerce(out)
 
         # per-route guards (auth, API keys, validation, …) attached by decorators
         for guard in getattr(handler, "_larz_guards", ()):
@@ -513,6 +599,12 @@ class Larz:
                 return self._coerce(gate)
 
         try:
+            from .params import needs_binding, bind
+            if needs_binding(handler):
+                kwargs, err = bind(handler, req)
+                if err is not None:
+                    return err
+                return self._coerce(handler(req, **kwargs))
             return self._coerce(handler(req))
         except Exception as exc:  # noqa
             _traceback.print_exc()
@@ -543,6 +635,8 @@ class Larz:
 
     # -- WSGI --------------------------------------------------------------- #
     def __call__(self, environ, start_response):
+        if not self._started:
+            self.startup()          # lazy startup (works under gunicorn too)
         req = Request(environ)
         req.session = self.sessions.load(req)
         had_cookie = self.sessions.cookie in req.cookies
@@ -569,6 +663,8 @@ class Larz:
             headers.append(("Set-Cookie", c))
 
         start_response(_status_line(resp.status), headers)
+        if resp._stream is not None:
+            return resp._stream
         return [resp.body]
 
     # -- dev server --------------------------------------------------------- #
@@ -578,8 +674,11 @@ class Larz:
             self.seo.install_routes()
         print("  Larz  money-native  ->  http://%s:%d  (%d routes)"
               % (host, port, len(self.routes)))
+        self.startup()
         srv = make_server(host, port, self)
         try:
             srv.serve_forever()
         except KeyboardInterrupt:
             print("\n  bye.")
+        finally:
+            self.shutdown()

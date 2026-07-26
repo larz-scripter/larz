@@ -32,13 +32,14 @@ from .templating import Template, Environment
 from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
                auth, api, ops, admin, twofa, oauth, storage, testing,
-               pricing, analytics, referrals, ai, crypto)
+               pricing, analytics, referrals, ai, crypto, params)
+from .params import Depends, Query, Path, Body, Form
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
-           "get_flashed_messages",
+           "get_flashed_messages", "Depends", "Query", "Path", "Body", "Form",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
            "auth", "api", "ops", "admin", "twofa", "oauth", "storage",
            "testing", "pricing", "analytics", "referrals", "ai", "crypto",
-           "__version__"]
+           "params", "__version__"]
