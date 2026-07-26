@@ -393,9 +393,9 @@ class _Money:
     # registration -------------------------------------------------------- #
     def plan(self, name, price, features=None, trial_days=None, limits=None, rank=None):
         cents, interval = parse_price(price)
-        self.plans[name] = {"sku": "plan:" + name, "cents": cents, "interval": interval,
-                            "features": features or [], "trial_days": trial_days,
-                            "price": price, "limits": limits or {},
+        self.plans[name] = {"name": name, "sku": "plan:" + name, "cents": cents,
+                            "interval": interval, "features": features or [],
+                            "trial_days": trial_days, "price": price, "limits": limits or {},
                             "rank": rank if rank is not None else len(self.plans)}
         return self
 

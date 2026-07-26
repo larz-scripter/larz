@@ -77,7 +77,8 @@ def test_root_path():
 
     @app.get("/")
     def home(req):
-        return ('<a href="/pricing">p</a> <a href="//cdn/x">c</a> '
+        return ('<a href="/pricing">p</a> <a href=\'/report\'>s</a> '
+                '<a href="//cdn/x">c</a> '
                 '<a href="http://a/b">a</a> <form action="/submit">'
                 '<img src="/logo.png"></form>')
 
@@ -91,7 +92,8 @@ def test_root_path():
 
     c = Client(app)
     h = c.get("/").text
-    ck("root_path prefixes href", 'href="/larz/demo/pricing"' in h)
+    ck("root_path prefixes href (double-quoted)", 'href="/larz/demo/pricing"' in h)
+    ck("root_path prefixes href (single-quoted)", "href='/larz/demo/report'" in h)
     ck("root_path prefixes action", 'action="/larz/demo/submit"' in h)
     ck("root_path prefixes src", 'src="/larz/demo/logo.png"' in h)
     ck("root_path leaves protocol-relative", 'href="//cdn/x"' in h)

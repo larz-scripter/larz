@@ -765,7 +765,11 @@ class Larz:
 
     def url(self, path):
         """Prefix an absolute app path with the mount root_path (for links/redirects
-        when the app is served under a subpath, e.g. root_path='/app')."""
+        when the app is served under a subpath, e.g. root_path='/app').
+
+        Note: when root_path is set, in-page ``href``/``action``/``src`` values that
+        start with ``/`` are auto-prefixed. Links to pages OUTSIDE your app's mount
+        should use a full ``https://…`` URL so they are left untouched."""
         if self.root_path and isinstance(path, str) and path.startswith("/") \
                 and not path.startswith(self.root_path + "/") and path != self.root_path:
             return self.root_path + path
@@ -783,7 +787,7 @@ class Larz:
             if resp._stream is None and "html" in resp.headers.get("Content-Type", ""):
                 rp = self.root_path.encode()
                 resp.body = re.sub(
-                    rb'((?:href|action|src)=")(/(?!/))',
+                    rb'((?:href|action|src)=["\'])(/(?!/))',
                     lambda m: m.group(1) + rp + b"/" + m.group(2)[1:], resp.body)
         headers = [(k, v) for k, v in resp.headers.items() if k != "_set_cookie"]
         for c in resp.headers.get("_set_cookie", []):
