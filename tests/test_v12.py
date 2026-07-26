@@ -58,8 +58,10 @@ def test_features():
     app.money.plan("pro", "$19/mo", features=["Priority"], limits={"projects": None, "api": True}, rank=1)
     class R: subject = "user:7"
     r = R()
-    ck("no plan: feature false", app.feature(r, "api") is False)
-    ck("no plan: limit default", app.plan_limit(r, "projects", default=1) == 1)
+    # unentitled users fall back to the implicit free tier ($0 plan)
+    ck("free tier: no pro feature", app.feature(r, "api") is False)
+    ck("free tier: uses free plan's limit", app.plan_limit(r, "projects", default=1) == 3)
+    ck("free tier: current is free", app.current_plan(r)["price"] == "$0")
     app.money.store.grant("user:7", "plan:pro")
     ck("pro: current plan", app.current_plan(r)["price"] == "$19/mo")
     ck("pro: feature api", app.feature(r, "api") is True)

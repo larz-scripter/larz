@@ -401,10 +401,15 @@ class _Money:
 
     # -- plan-aware entitlements: current plan, features, limits ----------- #
     def current_plan(self, req):
-        """The highest-ranked plan this caller is actively entitled to, or None."""
+        """The plan this caller is on: the highest-ranked plan they're actively
+        entitled to, or — if none — the cheapest free ($0) plan as an implicit
+        free tier. None only when no plan applies at all."""
         active = [p for p in self.plans.values()
                   if self.store.is_entitled(req.subject, p["sku"])]
-        return max(active, key=lambda p: p["rank"]) if active else None
+        if active:
+            return max(active, key=lambda p: p["rank"])
+        free = [p for p in self.plans.values() if p["cents"] == 0]
+        return min(free, key=lambda p: p["rank"]) if free else None
 
     def feature(self, req, name):
         """True if the caller's active plan grants feature `name` (by being in the

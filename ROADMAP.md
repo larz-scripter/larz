@@ -144,3 +144,20 @@ The last two big items, both done — still zero-dependency. 21 new tests (274 t
 **Larz is feature-complete against its roadmap** — money-native, AI-native,
 FastAPI-style ergonomics, async + WebSockets, sqlite *and* Postgres — all with
 **zero runtime dependencies** and nothing that phones home.
+
+---
+
+# ✅ v2.1 "Adoption" — SHIPPED
+
+Ecosystem work to make Larz easy to start with. 60 new tests (334 total).
+
+- **A project scaffolder** — `larz new <name> --template api|saas|ai|marketplace|
+  minimal` generates a complete, runnable project (app.py, tests, requirements,
+  .env, README). `larz new --list`. Every template ships passing.
+- **Real-world examples** — `url_shortener.py` (links + click analytics + metered
+  API) and `link_in_bio.py` (a Linktree with a Pro tier), on top of the SaaS, AI,
+  marketplace and typed-API examples.
+- **Benchmarks** — `bench/bench.py` measures honest in-process dispatch throughput.
+- **Implicit free tier** — unentitled users now fall back to the cheapest `$0`
+  plan, so free-tier limits (`app.within_limit`) work without an explicit
+  subscription.

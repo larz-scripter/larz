@@ -1,6 +1,8 @@
 # ⚡ Larz
 
 
+> **New in 2.1 — Scaffolder** — `larz new <name> --template api|saas|ai|marketplace` generates a complete, runnable project. Plus real-world examples (URL shortener, link-in-bio) and honest benchmarks.
+
 > **New in 2.0 — Async + Postgres** — an ASGI/async core with WebSockets (and a built-in zero-dependency async server, no uvicorn needed) plus a pure-Python PostgreSQL driver with SCRAM-SHA-256 auth. Still zero dependencies; sqlite stays the default.
 
 > **New in 1.3 — Modern API** — typed request binding & validation from function signatures, dataclass bodies, dependency injection (`Depends`), Server-Sent Events, CORS and lifecycle hooks. FastAPI-style ergonomics, still zero dependencies.
