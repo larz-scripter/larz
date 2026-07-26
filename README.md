@@ -1,6 +1,8 @@
 # ⚡ Larz
 
 
+> **New in 1.2 — the Revenue Engine** — pricing-as-code, revenue analytics (MRR/ARR/churn/LTV), dunning & recovery, referrals/affiliates, and **AI monetization** (token metering with BYOK). Larz is now revenue-native *and* AI-native. See the [changelog](https://larzos.com/larz/changelog/).
+
 > **New in 1.1** — TOTP 2FA, social login (Google/GitHub), file uploads, a marketplace payout ledger, four more payment providers (Square, Razorpay, Mollie, Coinbase Commerce), and a first-class test client. See the [changelog](https://larzos.com/larz/changelog/).
 [![PyPI](https://img.shields.io/pypi/v/larz.svg)](https://pypi.org/project/larz/)
 [![Python](https://img.shields.io/pypi/pyversions/larz.svg)](https://pypi.org/project/larz/)

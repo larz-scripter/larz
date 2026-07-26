@@ -69,3 +69,30 @@ Six additions, all zero-dependency, 52 new tests (164 total, CI green):
 - **Four more providers** — Square, Razorpay, Mollie, Coinbase Commerce (10 → 14).
 - **Test client** (`larz/testing.py`) — `Client(app)` in-process WSGI client with a
   cookie jar (`get/post/json/redirect`, `follow=True`, `login()`).
+
+---
+
+# ✅ v1.2 "The Revenue Engine" — SHIPPED
+
+Larz is now **revenue-native and AI-native**: not just *take* a payment, but run the
+whole money lifecycle. 56 new tests (220 total), zero dependencies.
+
+- **Pricing-as-code** (`larz/pricing.py`) — declare plans, usage prices, credit packs
+  and coupons as one `Pricing()` object; it generates the styled `/larz/pricing`
+  page, checkout, entitlements and metered prices. `/larz/subscribe/<plan>`.
+- **Feature flags & limits by plan** — `app.feature(req, "api")`,
+  `app.within_limit(req, "projects", n)`, `app.current_plan(req)`.
+- **Revenue analytics** (`larz/analytics.py`) — MRR, ARR, ARPU, LTV, churn and a
+  30-day chart at `/larz/admin/revenue`; `app.money.metrics()` for the raw numbers.
+- **Dunning & recovery** — `app.money.run_dunning()` retries lapsed renewals on a
+  schedule and revokes after a grace period; `on_payment_failed` hook.
+- **Referrals & affiliates** (`larz/referrals.py`) — referral links + automatic
+  commissions to the referrer's payout ledger when a referred user pays.
+- **AI monetization** (`larz/ai.py`) — `@app.ai_metered` + `app.ai.charge()` bill
+  tokens with **sub-cent accuracy**, **BYOK** keys encrypted at rest
+  (`larz/crypto.py`), per-plan rate limits, and an optional metered proxy.
+- **Authenticated encryption** (`larz/crypto.py`) — `Cipher` for secrets at rest
+  (HMAC-SHA256-CTR + encrypt-then-MAC, standard-library only).
+
+Next: **v1.3 "Modern API"** (typed-signature validation, DI, WebSockets/SSE,
+Swagger/ReDoc) → **v2.0 "Async"** (ASGI core).

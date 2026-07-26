@@ -88,7 +88,49 @@ class EntitlementStore:
               id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT, sku TEXT,
               cents INTEGER, ref TEXT, status TEXT DEFAULT 'pending',
               created_at REAL, paid_at REAL);
+            CREATE TABLE IF NOT EXISTS dunning(
+              subject TEXT, sku TEXT, first_failed REAL, attempts INTEGER DEFAULT 0,
+              last_notified REAL, status TEXT DEFAULT 'retrying',
+              PRIMARY KEY(subject, sku));
             """)
+
+    # subscriptions / dunning --------------------------------------------- #
+    def active_entitlements(self):
+        """All currently-valid entitlements (subject, sku, expires_at, created_at)."""
+        now = time.time()
+        with self._conn() as c:
+            rows = c.execute("SELECT subject, sku, expires_at, created_at FROM entitlements "
+                             "WHERE expires_at IS NULL OR expires_at > ?", (now,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def expired_subscriptions(self):
+        """Recurring subscriptions whose term has lapsed and were not renewed —
+        i.e. a plan sku (interval still set, non-empty) past its expires_at."""
+        now = time.time()
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT e.subject, e.sku, e.expires_at FROM entitlements e "
+                "JOIN sku_meta m ON m.sku = e.sku "
+                "WHERE m.interval IS NOT NULL AND m.interval != '' "
+                "AND e.expires_at IS NOT NULL AND e.expires_at < ?", (now,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def dunning_get(self, subject, sku):
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM dunning WHERE subject=? AND sku=?",
+                            (subject, sku)).fetchone()
+        return dict(row) if row else None
+
+    def dunning_upsert(self, subject, sku, first_failed, attempts, status="retrying"):
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO dunning"
+                      "(subject,sku,first_failed,attempts,last_notified,status)"
+                      " VALUES(?,?,?,?,?,?)",
+                      (subject, sku, first_failed, attempts, time.time(), status))
+
+    def dunning_clear(self, subject, sku):
+        with self._conn() as c:
+            c.execute("DELETE FROM dunning WHERE subject=? AND sku=?", (subject, sku))
 
     # marketplace payouts / split ledger ---------------------------------- #
     def record_payout(self, party, cents, sku=None, ref=None):
@@ -266,6 +308,20 @@ class EntitlementStore:
         with self._conn() as c:
             c.execute("UPDATE coupons SET redemptions=redemptions+1 WHERE code=?", (code,))
 
+    def revenue_series(self, days=30):
+        """Daily paid revenue (cents) for the last `days` days, oldest first."""
+        now = time.time()
+        start = now - days * 86400
+        buckets = [0] * days
+        with self._conn() as c:
+            rows = c.execute("SELECT cents, created_at FROM payments "
+                             "WHERE status='paid' AND created_at >= ?", (start,)).fetchall()
+        for r in rows:
+            idx = int((r["created_at"] - start) // 86400)
+            if 0 <= idx < days:
+                buckets[idx] += r["cents"]
+        return buckets
+
     # analytics ----------------------------------------------------------- #
     def stats(self):
         with self._conn() as c:
@@ -298,8 +354,12 @@ class _Money:
         self.admin_token = admin_token
         self.plans = {}        # name -> {sku, cents, interval, features, trial_days}
         self.packs = {}        # name -> {price_cents, credit_cents, label}
+        self.usages = {}       # name -> (cents, unit)  (metered prices)
+        self.pricing_page = None   # optional custom /larz/pricing renderer (set by use_pricing)
         self._on_grant = []    # callbacks(subject, sku)
         self._on_revoke = []
+        self._on_payment_failed = []
+        self._on_payment = []  # callbacks(subject, sku, cents) — every settled payment
         self._install_routes()
 
     # -- entitlement events ------------------------------------------------ #
@@ -308,6 +368,14 @@ class _Money:
 
     def on_revoke(self, fn):
         self._on_revoke.append(fn); return fn
+
+    def on_payment_failed(self, fn):
+        """Called (subject, sku) when a subscription is dropped after dunning."""
+        self._on_payment_failed.append(fn); return fn
+
+    def on_payment(self, fn):
+        """Called (subject, sku, cents) on every settled payment (drives referrals)."""
+        self._on_payment.append(fn); return fn
 
     def cancel(self, subject, sku, immediate=False):
         """Cancel a subscription. Default = at period end (keep until expiry);
@@ -323,12 +391,143 @@ class _Money:
             except Exception: pass
 
     # registration -------------------------------------------------------- #
-    def plan(self, name, price, features=None, trial_days=None):
+    def plan(self, name, price, features=None, trial_days=None, limits=None, rank=None):
         cents, interval = parse_price(price)
         self.plans[name] = {"sku": "plan:" + name, "cents": cents, "interval": interval,
                             "features": features or [], "trial_days": trial_days,
-                            "price": price}
+                            "price": price, "limits": limits or {},
+                            "rank": rank if rank is not None else len(self.plans)}
         return self
+
+    # -- plan-aware entitlements: current plan, features, limits ----------- #
+    def current_plan(self, req):
+        """The highest-ranked plan this caller is actively entitled to, or None."""
+        active = [p for p in self.plans.values()
+                  if self.store.is_entitled(req.subject, p["sku"])]
+        return max(active, key=lambda p: p["rank"]) if active else None
+
+    def feature(self, req, name):
+        """True if the caller's active plan grants feature `name` (by being in the
+        plan's features list, or a truthy entry in its limits)."""
+        p = self.current_plan(req)
+        if not p:
+            return False
+        return name in p["features"] or bool(p["limits"].get(name))
+
+    def plan_limit(self, req, key, default=0):
+        """The numeric limit for `key` on the caller's active plan. None means
+        unlimited; the default applies when they have no plan."""
+        p = self.current_plan(req)
+        if not p:
+            return default
+        return p["limits"].get(key, default)
+
+    def within_limit(self, req, key, count, default=0):
+        """True if `count` is under the caller's plan limit for `key`
+        (None limit = unlimited)."""
+        lim = self.plan_limit(req, key, default)
+        return True if lim is None else count < lim
+
+    # -- dunning: retry & recover failed subscription renewals ------------- #
+    def run_dunning(self, grace_days=7, schedule=(0, 3, 7), on_notify=None):
+        """Scan for subscriptions whose renewal lapsed and drive recovery: notify
+        the customer on each scheduled day, and after `grace_days` revoke access
+        and fire on_payment_failed. Call from a scheduled job:
+
+            @app.schedule("0 9 * * *")     # daily 9am
+            def dun(): app.money.run_dunning(on_notify=send_reminder_email)
+
+        Idempotent — safe to run repeatedly. Returns {'notified', 'revoked'}.
+        """
+        notified = revoked = 0
+        now = time.time()
+        for sub in self.store.expired_subscriptions():
+            subject, sku, expired_at = sub["subject"], sub["sku"], sub["expires_at"]
+            row = self.store.dunning_get(subject, sku)
+            first = row["first_failed"] if row else expired_at
+            attempts = row["attempts"] if row else 0
+            if row and row["status"] != "retrying":
+                continue
+            days = (now - first) / 86400.0
+            # send any scheduled reminders now due
+            while attempts < len(schedule) and days >= schedule[attempts]:
+                attempts += 1
+                if on_notify:
+                    try: on_notify(subject, sku, attempts)
+                    except Exception: pass
+                notified += 1
+            if days >= grace_days:
+                self.store.revoke(subject, sku)
+                self.store.dunning_upsert(subject, sku, first, attempts, status="revoked")
+                for fn in self._on_payment_failed:
+                    try: fn(subject, sku)
+                    except Exception: pass
+                revoked += 1
+            else:
+                self.store.dunning_upsert(subject, sku, first, attempts, status="retrying")
+        return {"notified": notified, "revoked": revoked}
+
+    def clear_dunning(self, subject, sku):
+        """Call when a renewal succeeds to reset a subscription's dunning state."""
+        self.store.dunning_clear(subject, sku)
+
+    # -- revenue metrics (MRR, ARR, ARPU, LTV, churn) ---------------------- #
+    def _monthly_cents(self, plan):
+        c, iv = plan["cents"], plan["interval"]
+        if iv in ("mo", "month"):  return c
+        if iv in ("yr", "year"):   return c / 12.0
+        if iv in ("wk", "week"):   return c * 52 / 12.0
+        if iv == "day":            return c * 30.0
+        return 0.0                                  # one-off / non-recurring
+
+    def metrics(self):
+        """Revenue metrics computed from your own payment data. Cents throughout."""
+        plan_by_sku = {p["sku"]: p for p in self.plans.values()}
+        active = self.store.active_entitlements()
+        mrr = 0.0
+        subscribers = 0
+        per_plan = {}
+        for e in active:
+            p = plan_by_sku.get(e["sku"])
+            if not p or not p["interval"]:
+                continue
+            subscribers += 1
+            m = self._monthly_cents(p)
+            mrr += m
+            per_plan.setdefault(p["sku"], {"name": None, "count": 0, "mrr_cents": 0.0})
+            per_plan[p["sku"]]["count"] += 1
+            per_plan[p["sku"]]["mrr_cents"] += m
+        for name, p in self.plans.items():
+            if p["sku"] in per_plan:
+                per_plan[p["sku"]]["name"] = name
+        base = self.store.stats()
+        # churn estimate: subs dropped after dunning in the last 30 days
+        now = time.time()
+        with self.store._conn() as c:
+            churned_30 = c.execute(
+                "SELECT COUNT(*) n FROM dunning WHERE status='revoked' "
+                "AND last_notified > ?", (now - 30 * 86400,)).fetchone()["n"]
+            new_30 = c.execute(
+                "SELECT COUNT(*) n FROM payments WHERE status='paid' "
+                "AND created_at > ?", (now - 30 * 86400,)).fetchone()["n"]
+            rev_30 = c.execute(
+                "SELECT COALESCE(SUM(cents),0) s FROM payments WHERE status='paid' "
+                "AND created_at > ?", (now - 30 * 86400,)).fetchone()["s"]
+        denom = subscribers + churned_30
+        churn_rate = (churned_30 / denom) if denom else 0.0
+        arpu = (mrr / subscribers) if subscribers else 0.0
+        ltv = (arpu / churn_rate) if churn_rate else None
+        return {
+            "mrr_cents": round(mrr), "arr_cents": round(mrr * 12),
+            "active_subscribers": subscribers,
+            "arpu_cents": round(arpu), "ltv_cents": round(ltv) if ltv else None,
+            "churn_rate": round(churn_rate, 4), "churned_30d": churned_30,
+            "new_payments_30d": new_30, "revenue_30d_cents": rev_30,
+            "total_revenue_cents": base["revenue_cents"], "payments": base["payments"],
+            "outstanding_credit_cents": base["outstanding_credit_cents"],
+            "per_plan": sorted(per_plan.values(), key=lambda x: -x["mrr_cents"]),
+            "recent": base["recent"], "top_usage": base["top_usage"],
+        }
 
     def credit_pack(self, name, price, credit, label=None):
         pcents, _ = parse_price(price)
@@ -451,11 +650,15 @@ class _Money:
                 interval = plan["interval"] if plan else None
             days = _INTERVAL_DAYS.get(interval) if interval else None
             self.store.grant(subject, sku, days=days)
+            self.store.dunning_clear(subject, sku)      # a paid renewal recovers it
             for fn in self._on_grant:
                 try: fn(subject, sku)
                 except Exception: pass
         self.store.record_payment(result["payment_id"], subject, sku, cents, provider_name)
         self.store.record_invoice(result["payment_id"], subject, sku, cents, provider_name)
+        for fn in self._on_payment:
+            try: fn(subject, sku, cents)
+            except Exception: pass
 
     # built-in routes ----------------------------------------------------- #
     def _install_routes(self):
@@ -503,14 +706,35 @@ class _Money:
                                  pack["price_cents"], success_path="/larz/credits")
             return Response.redirect(url)
 
+        @app.get("/larz/subscribe/<plan>", sitemap=False)
+        def _subscribe(req):
+            plan = self.plans.get(req.params["plan"])
+            if not plan:
+                return Response("no such plan", status=404)
+            subject = req.subject
+            if self.store.is_entitled(subject, plan["sku"]):
+                return Response.redirect("/larz/account")
+            if plan["interval"]:
+                self.store.set_interval(plan["sku"], plan["interval"])
+            if plan["trial_days"] and self.store.trial_available(subject, plan["sku"]):
+                self.store.start_trial(subject, plan["sku"], plan["trial_days"])
+                return Response.redirect("/larz/account")
+            return Response.redirect(self._checkout(req, subject, plan["sku"], plan["cents"],
+                                                    success_path="/larz/account"))
+
         @app.get("/larz/pricing", sitemap=False)
         def _pricing(req):
+            if self.pricing_page:
+                return Response(self.pricing_page(req) if callable(self.pricing_page)
+                                else self.pricing_page)
             rows = []
             for name, p in self.plans.items():
                 feats = "".join("<li>%s</li>" % f for f in p["features"])
                 trial = " (%d-day free trial)" % p["trial_days"] if p["trial_days"] else ""
-                rows.append("<div class='plan'><h2>%s — %s%s</h2><ul>%s</ul></div>"
-                            % (name.title(), p["price"], trial, feats))
+                cta = ("" if p["cents"] == 0 else
+                       " <a href='/larz/subscribe/%s'>Choose %s</a>" % (name, name.title()))
+                rows.append("<div class='plan'><h2>%s — %s%s</h2><ul>%s</ul>%s</div>"
+                            % (name.title(), p["price"], trial, feats, cta))
             return Response("<h1>Pricing</h1>" + ("".join(rows) or "<p>No plans yet</p>"))
 
         @app.get("/larz/account", sitemap=False)
@@ -591,4 +815,9 @@ def enable(app, provider=None, db="larz_money.db",
     provider = provider or MockProvider()
     store = EntitlementStore(db)
     app.money = _Money(app, provider, store, base_url, admin_token=admin_token)
+    # convenience aliases on the app for plan features / limits
+    app.feature = app.money.feature
+    app.within_limit = app.money.within_limit
+    app.plan_limit = app.money.plan_limit
+    app.current_plan = app.money.current_plan
     return app.money

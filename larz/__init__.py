@@ -31,12 +31,14 @@ from .core import (Larz, Request, Response, Blueprint, UploadedFile,
 from .templating import Template, Environment
 from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
-               auth, api, ops, admin, twofa, oauth, storage, testing)
+               auth, api, ops, admin, twofa, oauth, storage, testing,
+               pricing, analytics, referrals, ai, crypto)
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
            "get_flashed_messages",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
            "auth", "api", "ops", "admin", "twofa", "oauth", "storage",
-           "testing", "__version__"]
+           "testing", "pricing", "analytics", "referrals", "ai", "crypto",
+           "__version__"]
