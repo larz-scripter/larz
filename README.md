@@ -1,5 +1,7 @@
 # ⚡ Larz
 
+
+> **New in 1.1** — TOTP 2FA, social login (Google/GitHub), file uploads, a marketplace payout ledger, four more payment providers (Square, Razorpay, Mollie, Coinbase Commerce), and a first-class test client. See the [changelog](https://larzos.com/larz/changelog/).
 [![PyPI](https://img.shields.io/pypi/v/larz.svg)](https://pypi.org/project/larz/)
 [![Python](https://img.shields.io/pypi/pyversions/larz.svg)](https://pypi.org/project/larz/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

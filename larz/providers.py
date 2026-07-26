@@ -26,7 +26,8 @@ import urllib.request
 __all__ = ["PaymentProvider", "MockProvider", "StripeProvider",
            "GemVaultProvider", "DodoProvider", "CryptoProvider",
            "PaddleProvider", "LemonSqueezyProvider", "PaystackProvider",
-           "PayPalProvider"]
+           "PayPalProvider", "SquareProvider", "RazorpayProvider",
+           "MollieProvider", "CoinbaseCommerceProvider"]
 
 
 class PaymentProvider:
@@ -389,3 +390,162 @@ class PayPalProvider(PaymentProvider):
         amt = res.get("amount", {}).get("value", "0")
         return {"subject": subject, "sku": sku,
                 "cents": int(round(float(amt) * 100)), "payment_id": res.get("id")}
+
+
+# --------------------------------------------------------------------------- #
+class SquareProvider(PaymentProvider):
+    """Square hosted checkout (Payment Links). Webhook = HMAC-SHA256 (base64) of
+    the notification URL + body under the signature key."""
+    name = "square"
+
+    def __init__(self, access_token, location_id, signature_key=None,
+                 notification_url="", api_base="https://connect.squareup.com"):
+        self.access_token = access_token
+        self.location_id = location_id
+        self.signature_key = signature_key
+        self.notification_url = notification_url
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/v2/online-checkout/payment-links", {
+            "idempotency_key": "%s-%s-%d" % (subject, sku, int(time.time())),
+            "quick_pay": {"name": sku, "price_money": {"amount": cents, "currency": "USD"},
+                          "location_id": self.location_id},
+            "checkout_options": {"redirect_url": success_url},
+            "payment_note": "%s|%s" % (subject, sku)},
+            headers={"Authorization": "Bearer " + self.access_token,
+                     "Square-Version": "2024-01-18"})
+        return resp["payment_link"]["url"]
+
+    def parse_webhook(self, req):
+        if self.signature_key:
+            import base64 as _b64
+            mac = hmac.new(self.signature_key.encode(),
+                           (self.notification_url + req.body.decode("utf-8", "replace")).encode(),
+                           hashlib.sha256).digest()
+            expected = _b64.b64encode(mac).decode()
+            if not hmac.compare_digest(req.header("x-square-hmacsha256-signature") or "", expected):
+                return None
+        e = req.json() or {}
+        if e.get("type") not in ("payment.updated", "payment.created"):
+            return None
+        pay = (e.get("data", {}).get("object", {}) or {}).get("payment", {})
+        if pay.get("status") != "COMPLETED":
+            return None
+        subject, _, sku = (pay.get("note") or "").partition("|")
+        amt = (pay.get("amount_money") or {}).get("amount", 0)
+        return {"subject": subject, "sku": sku, "cents": amt, "payment_id": pay.get("id")}
+
+
+# --------------------------------------------------------------------------- #
+class RazorpayProvider(PaymentProvider):
+    """Razorpay Payment Links (popular in India). Webhook = HMAC-SHA256 hex of the
+    raw body under the webhook secret."""
+    name = "razorpay"
+
+    def __init__(self, key_id, key_secret, webhook_secret=None,
+                 currency="INR", api_base="https://api.razorpay.com/v1"):
+        self.key_id = key_id
+        self.key_secret = key_secret
+        self.webhook_secret = webhook_secret
+        self.currency = currency
+        self.api_base = api_base.rstrip("/")
+
+    def _auth(self):
+        import base64 as _b64
+        return "Basic " + _b64.b64encode(("%s:%s" % (self.key_id, self.key_secret)).encode()).decode()
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/payment_links", {
+            "amount": cents, "currency": self.currency,
+            "description": sku, "notes": {"subject": subject, "sku": sku},
+            "callback_url": success_url, "callback_method": "get"},
+            headers={"Authorization": self._auth()})
+        return resp["short_url"]
+
+    def parse_webhook(self, req):
+        if self.webhook_secret:
+            expected = hmac.new(self.webhook_secret.encode(), req.body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(req.header("x-razorpay-signature") or "", expected):
+                return None
+        e = req.json() or {}
+        if e.get("event") not in ("payment_link.paid", "payment.captured"):
+            return None
+        entity = (((e.get("payload") or {}).get("payment_link") or {}).get("entity")
+                  or ((e.get("payload") or {}).get("payment") or {}).get("entity") or {})
+        notes = entity.get("notes") or {}
+        return {"subject": notes.get("subject"), "sku": notes.get("sku"),
+                "cents": entity.get("amount", 0), "payment_id": entity.get("id")}
+
+
+# --------------------------------------------------------------------------- #
+class MollieProvider(PaymentProvider):
+    """Mollie hosted checkout (EU). Confirmation is pull-based: the webhook posts
+    only an id, so we re-fetch the payment to confirm it's paid."""
+    name = "mollie"
+
+    def __init__(self, api_key, currency="EUR", api_base="https://api.mollie.com/v2"):
+        self.api_key = api_key
+        self.currency = currency
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/payments", {
+            "amount": {"currency": self.currency, "value": "%.2f" % (cents / 100.0)},
+            "description": sku, "redirectUrl": success_url,
+            "metadata": {"subject": subject, "sku": sku}},
+            headers={"Authorization": "Bearer " + self.api_key})
+        return resp["_links"]["checkout"]["href"]
+
+    def parse_webhook(self, req):
+        pid = (req.form.get("id") if req.form else None) or (req.json() or {}).get("id")
+        if not pid:
+            return None
+        r = urllib.request.Request(self.api_base + "/payments/" + pid,
+                                   headers={"Authorization": "Bearer " + self.api_key})
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            pay = json.loads(resp.read().decode())
+        if pay.get("status") != "paid":
+            return None
+        meta = pay.get("metadata") or {}
+        cents = int(round(float(pay.get("amount", {}).get("value", "0")) * 100))
+        return {"subject": meta.get("subject"), "sku": meta.get("sku"),
+                "cents": cents, "payment_id": pid}
+
+
+# --------------------------------------------------------------------------- #
+class CoinbaseCommerceProvider(PaymentProvider):
+    """Coinbase Commerce hosted crypto checkout. Webhook = HMAC-SHA256 hex of the
+    raw body under the shared webhook secret (X-CC-Webhook-Signature)."""
+    name = "coinbase"
+
+    def __init__(self, api_key, webhook_secret=None,
+                 api_base="https://api.commerce.coinbase.com"):
+        self.api_key = api_key
+        self.webhook_secret = webhook_secret
+        self.api_base = api_base.rstrip("/")
+
+    def create_checkout(self, subject, sku, cents, success_url, cancel_url):
+        resp = _post_json(self.api_base + "/charges", {
+            "name": sku, "description": sku, "pricing_type": "fixed_price",
+            "local_price": {"amount": "%.2f" % (cents / 100.0), "currency": "USD"},
+            "metadata": {"subject": subject, "sku": sku},
+            "redirect_url": success_url, "cancel_url": cancel_url},
+            headers={"X-CC-Api-Key": self.api_key, "X-CC-Version": "2018-03-22"})
+        return resp["data"]["hosted_url"]
+
+    def parse_webhook(self, req):
+        if self.webhook_secret:
+            expected = hmac.new(self.webhook_secret.encode(), req.body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(req.header("X-CC-Webhook-Signature") or "", expected):
+                return None
+        e = req.json() or {}
+        ev = e.get("event", {})
+        if ev.get("type") not in ("charge:confirmed", "charge:resolved"):
+            return None
+        d = ev.get("data", {})
+        meta = d.get("metadata") or {}
+        pricing = (d.get("pricing") or {}).get("local", {})
+        cents = int(round(float(pricing.get("amount", "0")) * 100)) if pricing else 0
+        return {"subject": meta.get("subject"), "sku": meta.get("sku"),
+                "cents": cents, "payment_id": d.get("code")}

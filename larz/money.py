@@ -84,7 +84,51 @@ class EntitlementStore:
             CREATE TABLE IF NOT EXISTS invoices(
               id TEXT PRIMARY KEY, subject TEXT, sku TEXT, cents INTEGER,
               provider TEXT, created_at REAL);
+            CREATE TABLE IF NOT EXISTS payouts(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT, sku TEXT,
+              cents INTEGER, ref TEXT, status TEXT DEFAULT 'pending',
+              created_at REAL, paid_at REAL);
             """)
+
+    # marketplace payouts / split ledger ---------------------------------- #
+    def record_payout(self, party, cents, sku=None, ref=None):
+        with self._conn() as c:
+            cur = c.execute("INSERT INTO payouts(party,sku,cents,ref,status,created_at)"
+                            " VALUES(?,?,?,?,'pending',?)",
+                            (party, sku, int(cents), ref, time.time()))
+            return cur.lastrowid
+
+    def list_payouts(self, party=None, status=None):
+        q = "SELECT * FROM payouts"
+        conds, args = [], []
+        if party:
+            conds.append("party=?"); args.append(party)
+        if status:
+            conds.append("status=?"); args.append(status)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY created_at DESC"
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(q, args).fetchall()]
+
+    def payout_owed(self, party):
+        with self._conn() as c:
+            row = c.execute("SELECT COALESCE(SUM(cents),0) s FROM payouts "
+                            "WHERE party=? AND status='pending'", (party,)).fetchone()
+        return row["s"]
+
+    def mark_payout_paid(self, payout_id):
+        with self._conn() as c:
+            c.execute("UPDATE payouts SET status='paid', paid_at=? WHERE id=?",
+                      (time.time(), payout_id))
+
+    def payout_totals(self):
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT party, COALESCE(SUM(CASE WHEN status='pending' THEN cents END),0) owed, "
+                "COALESCE(SUM(cents),0) total FROM payouts GROUP BY party "
+                "ORDER BY owed DESC").fetchall()
+        return [dict(r) for r in rows]
 
     # invoices ------------------------------------------------------------ #
     def record_invoice(self, iid, subject, sku, cents, provider):
@@ -292,6 +336,32 @@ class _Money:
         self.packs[name] = {"price_cents": pcents, "credit_cents": ccents,
                             "label": label or name, "price": price}
         return self
+
+    # -- marketplace: split a sale into seller/platform payouts ------------- #
+    def split(self, splits, sku=None, ref=None):
+        """Record a marketplace split ledger for one sale. `splits` is a list of
+        (party, amount) where amount is "$8.50" or an integer number of cents.
+        Returns the list of created payout ids. Money-native marketplaces use
+        this to track what each seller is owed:
+
+            app.money.split([("seller:42", "$8.50"), ("platform", "$1.50")],
+                            sku=order.id)
+        """
+        ids = []
+        for party, amount in splits:
+            cents = amount if isinstance(amount, int) else parse_price(amount)[0]
+            ids.append(self.store.record_payout(party, cents, sku=sku, ref=ref))
+        return ids
+
+    def payouts(self, party=None, status=None):
+        return self.store.list_payouts(party=party, status=status)
+
+    def owed(self, party):
+        """Cents currently owed to a party (sum of pending payouts)."""
+        return self.store.payout_owed(party)
+
+    def mark_paid(self, payout_id):
+        self.store.mark_payout_paid(payout_id)
 
     def _sku_for(self, spec, route):
         if spec.get("plan"):

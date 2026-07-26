@@ -26,14 +26,17 @@ Modules: money, auth, api, providers, security, ops, admin, seo, templating,
 models. See examples/ for runnable demos.
 """
 
-from .core import Larz, Request, Response, Blueprint
+from .core import (Larz, Request, Response, Blueprint, UploadedFile,
+                   get_flashed_messages)
 from .templating import Template, Environment
 from .models import Model, Field, connect
 from . import (money, seo, providers, security, templating, models,
-               auth, api, ops, admin)
+               auth, api, ops, admin, twofa, oauth, storage, testing)
 
-__version__ = "1.0.2"
-__all__ = ["Larz", "Request", "Response", "Blueprint",
+__version__ = "1.1.0"
+__all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
+           "get_flashed_messages",
            "Template", "Environment", "Model", "Field", "connect",
            "money", "seo", "providers", "security", "templating", "models",
-           "auth", "api", "ops", "admin", "__version__"]
+           "auth", "api", "ops", "admin", "twofa", "oauth", "storage",
+           "testing", "__version__"]

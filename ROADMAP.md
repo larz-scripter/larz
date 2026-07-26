@@ -46,6 +46,26 @@ thesis at the center. Four expansion packs, built in dependency order.
 ## Deferred to post-1.0 (honest scope)
 - Full **ASGI/async core** (a parallel runtime — rewrite-scale; the money model is sync-friendly)
 - **Postgres** ORM adapter (sqlite ships; backend is pluggable)
-- OAuth login providers, TOTP 2FA (extension points provided)
 
 Target: **v1.0.0** — every pack's core built, tested (no pytest), documented, PyPI-released.
+
+---
+
+# ✅ v1.1 — SHIPPED
+
+Six additions, all zero-dependency, 52 new tests (164 total, CI green):
+
+- **TOTP 2FA** (`larz/twofa.py`) — RFC 6238 authenticator codes + one-time backup
+  codes; `app.twofa.begin/activate/verify`, `@app.twofa_required`. Works with
+  Google Authenticator, Authy, 1Password.
+- **Social login** (`larz/oauth.py`) — Google / GitHub / any OAuth2 provider over
+  urllib; `/larz/oauth/<provider>/login` finds-or-creates a `User`.
+- **File uploads** — `req.files` (stdlib multipart parser) + `req.htmx`,
+  `req.flash()` / `get_flashed_messages()`, `Response.hx_trigger()`.
+- **Storage** (`larz/storage.py`) — `LocalStorage` with safe names, mounting, and a
+  pluggable backend interface.
+- **Marketplace payouts** — `app.money.split(...)` records a seller/platform split
+  ledger; `app.money.owed(party)`, `payouts()`, `mark_paid()`.
+- **Four more providers** — Square, Razorpay, Mollie, Coinbase Commerce (10 → 14).
+- **Test client** (`larz/testing.py`) — `Client(app)` in-process WSGI client with a
+  cookie jar (`get/post/json/redirect`, `follow=True`, `login()`).

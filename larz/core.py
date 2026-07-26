@@ -25,7 +25,77 @@ from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
-__all__ = ["Larz", "Request", "Response", "Blueprint"]
+__all__ = ["Larz", "Request", "Response", "Blueprint", "UploadedFile",
+           "get_flashed_messages"]
+
+
+# --------------------------------------------------------------------------- #
+#  File uploads (multipart/form-data) — pure stdlib, no cgi module
+# --------------------------------------------------------------------------- #
+class UploadedFile:
+    def __init__(self, filename, content_type, data):
+        self.filename = filename
+        self.content_type = content_type
+        self.data = data
+
+    @property
+    def size(self):
+        return len(self.data)
+
+    def save(self, path):
+        with open(path, "wb") as f:
+            f.write(self.data)
+        return path
+
+    def __repr__(self):
+        return "<UploadedFile %r %d bytes>" % (self.filename, self.size)
+
+
+def _parse_multipart(body, boundary):
+    """Split a multipart/form-data body into (text_fields, files) dicts."""
+    fields, files = {}, {}
+    delim = b"--" + boundary.encode("latin-1")
+    for part in body.split(delim):
+        if not part or part in (b"--\r\n", b"--", b"\r\n"):
+            continue
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        head, _, content = part.partition(b"\r\n\r\n")
+        if not _:
+            continue
+        headers = {}
+        for line in head.split(b"\r\n"):
+            if b":" in line:
+                k, v = line.split(b":", 1)
+                headers[k.strip().lower().decode("latin-1")] = v.strip().decode("latin-1")
+        disp = headers.get("content-disposition", "")
+        name = _cd_param(disp, "name")
+        if name is None:
+            continue
+        filename = _cd_param(disp, "filename")
+        if filename is not None:
+            files[name] = UploadedFile(filename, headers.get("content-type",
+                                       "application/octet-stream"), content)
+        else:
+            fields[name] = content.decode("utf-8", "replace")
+    return fields, files
+
+
+def _cd_param(disposition, key):
+    m = re.search(r'%s="((?:[^"\\]|\\.)*)"' % re.escape(key), disposition)
+    if m:
+        return m.group(1).replace('\\"', '"')
+    return None
+
+
+def get_flashed_messages(req, with_categories=False):
+    """Pop and return one-shot flash messages stored in the session."""
+    msgs = req.session.pop("_flashes", [])
+    if with_categories:
+        return [tuple(m) for m in msgs]
+    return [m[1] for m in msgs]
 
 
 # --------------------------------------------------------------------------- #
@@ -75,12 +145,40 @@ class Request:
         except Exception:
             return None
 
+    def _parse_multipart(self):
+        if getattr(self, "_mp", None) is None:
+            ctype = self.header("Content-Type") or ""
+            m = re.search(r"boundary=([^;]+)", ctype)
+            if "multipart/form-data" in ctype and m:
+                self._mp = _parse_multipart(self.body, m.group(1).strip().strip('"'))
+            else:
+                self._mp = ({}, {})
+        return self._mp
+
     @property
     def form(self):
-        if "application/x-www-form-urlencoded" not in (self.header("Content-Type") or ""):
-            return {}
-        return {k: v[0] if len(v) == 1 else v
-                for k, v in parse_qs(self.body.decode("utf-8")).items()}
+        ctype = self.header("Content-Type") or ""
+        if "application/x-www-form-urlencoded" in ctype:
+            return {k: v[0] if len(v) == 1 else v
+                    for k, v in parse_qs(self.body.decode("utf-8")).items()}
+        if "multipart/form-data" in ctype:
+            return dict(self._parse_multipart()[0])
+        return {}
+
+    @property
+    def files(self):
+        """Uploaded files from a multipart/form-data request: name -> UploadedFile."""
+        return self._parse_multipart()[1]
+
+    @property
+    def htmx(self):
+        """True if the request came from HTMX (has the HX-Request header)."""
+        return self.header("HX-Request") == "true"
+
+    def flash(self, message, category="info"):
+        """Queue a one-shot message for the next response (via the session).
+        Read it with larz.get_flashed_messages(req)."""
+        self.session.setdefault("_flashes", []).append([category, message])
 
     @property
     def subject(self):
@@ -114,6 +212,16 @@ class Response:
     @classmethod
     def json(cls, data, status=200):
         return cls(json.dumps(data), status=status, content_type="application/json")
+
+    def hx_trigger(self, event, detail=None):
+        """Fire a client-side HTMX event via the HX-Trigger response header."""
+        self.headers["HX-Trigger"] = event if detail is None else json.dumps({event: detail})
+        return self
+
+    @classmethod
+    def hx_redirect(cls, location):
+        """Client-side redirect that HTMX honours (HX-Redirect header)."""
+        return cls("", headers={"HX-Redirect": location})
 
     def set_cookie(self, key, value, http_only=True, path="/", max_age=None):
         parts = ["%s=%s" % (key, value), "Path=%s" % path, "SameSite=Lax"]
